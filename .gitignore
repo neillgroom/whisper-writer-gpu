@@ -1,0 +1,47 @@
+# --- PRIVATE: verbatim record of everything you have ever dictated. Never commit. ---
+history.log
+
+# Runtime logs
+worker.log
+*.err
+*.log
+
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# Editors / OS
+.idea/
+.vscode/
+.spyderproject
+.spyproject
+.ropeproject
+Thumbs.db
+desktop.ini

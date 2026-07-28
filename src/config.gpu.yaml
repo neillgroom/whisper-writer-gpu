@@ -1,0 +1,31 @@
+model_options:
+  use_api: false
+  common:
+    language: null
+    temperature: 0.0
+    initial_prompt: "Hello, welcome to my lecture. How are you today? We will discuss important topics, commas, and more."
+  local:
+    model: large-v3-turbo
+    device: cuda
+    compute_type: float16
+    condition_on_previous_text: true
+    vad_filter: false
+    model_path: null
+recording_options:
+  activation_key: pause
+  input_backend: auto
+  recording_mode: hold_to_record
+  sound_device: null
+  sample_rate: 16000
+  silence_duration: 900
+  min_duration: 100
+post_processing:
+  writing_key_press_delay: 0.005
+  remove_trailing_period: false
+  add_trailing_space: true
+  remove_capitalization: false
+  input_method: pynput
+misc:
+  print_to_terminal: true
+  hide_status_window: false
+  noise_on_completion: false

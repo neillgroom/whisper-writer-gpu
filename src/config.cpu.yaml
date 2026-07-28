@@ -1,0 +1,47 @@
+# =====================================================================
+# CPU / NO-GPU preset — for modern laptops without an NVIDIA GPU
+# (ThinkPad / work-issued machines, etc.). Fast, LLM-grade dictation —
+# good enough to talk to an AI, not tuned for email-perfect accuracy.
+#
+# To use on a non-GPU machine: copy this over src/config.yaml.
+# Verified 2026-07-01 on CPU int8: base.en transcribes ~8x faster than
+# real-time with clean-speech accuracy near 100%.
+#
+# FIRST-RUN NOTE (Windows): the model (~150 MB) auto-downloads on first
+# use. If you're NOT in Windows Developer Mode, set this before launch or
+# the download errors on symlink creation:
+#     setx HF_HUB_DISABLE_SYMLINKS 1       (new terminal after)
+# =====================================================================
+model_options:
+  use_api: false
+  common:
+    language: en           # base.en is English-only; keep this "en"
+    temperature: 0.0
+    initial_prompt: null
+  local:
+    model: base.en         # fast + accurate enough for LLM input.
+                           # Want more accuracy (slower on CPU)? -> small.en
+                           # Very slow machine / max speed? -> tiny.en
+    device: cpu
+    compute_type: int8     # the CPU sweet spot (float16 is GPU-only)
+    condition_on_previous_text: false   # dictation snippets: avoid cross-segment drift
+    vad_filter: true       # trim silence -> faster + cleaner transcript
+    model_path: null
+recording_options:
+  activation_key: pause
+  input_backend: auto
+  recording_mode: hold_to_record
+  sound_device: null
+  sample_rate: 16000
+  silence_duration: 900
+  min_duration: 100
+post_processing:
+  writing_key_press_delay: 0.005
+  remove_trailing_period: false
+  add_trailing_space: true
+  remove_capitalization: false
+  input_method: pynput
+misc:
+  print_to_terminal: true
+  hide_status_window: false
+  noise_on_completion: false
