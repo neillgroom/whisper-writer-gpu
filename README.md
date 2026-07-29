@@ -193,3 +193,9 @@ If the maintainers want any of this upstream, take it. No permission needed.
 ## License
 
 MIT. Same as upstream. Do whatever you want with it.
+
+---
+
+## Helene developer controls
+
+Pause/Break remains direct local dictation. Ctrl+Pause, or a transcription beginning with “Helene,” routes to a separate Windows control broker for named apps, repositories, shortcuts, Claude Code tasks, and Factory workflows. See **[CONTROL.md](CONTROL.md)** for commands and configuration.
