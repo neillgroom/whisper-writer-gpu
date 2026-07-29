@@ -1,4 +1,3 @@
-import ctypes
 import os
 import re
 import sys
@@ -140,13 +139,6 @@ class WhisperWriterApp(QObject):
             )
             self.initialize_components()
 
-    @staticmethod
-    def is_ctrl_pressed():
-        """Read Ctrl state when Pause activates without adding a second keyboard hook."""
-        if sys.platform != 'win32':
-            return False
-        return bool(ctypes.windll.user32.GetAsyncKeyState(0x11) & 0x8000)
-
     def on_activation(self):
         """
         Called when the activation key combination is pressed.
@@ -160,7 +152,7 @@ class WhisperWriterApp(QObject):
             return
 
         # Ctrl+Pause is the explicit command channel. Pause alone remains dictation.
-        self.recording_target = 'command' if self.is_ctrl_pressed() else 'dictation'
+        self.recording_target = 'command' if self.key_listener.ctrl_is_pressed() else 'dictation'
         self.start_result_thread()
 
     def on_deactivation(self):
