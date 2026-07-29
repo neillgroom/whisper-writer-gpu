@@ -831,7 +831,7 @@ class PynputBackend(InputBackend):
 
     def _create_key_map(self):
         """Create a mapping from pynput keys to our internal KeyCode enum."""
-        return {
+        key_map = {
             # Modifier keys
             self.keyboard.Key.ctrl_l: KeyCode.CTRL_LEFT,
             self.keyboard.Key.ctrl_r: KeyCode.CTRL_RIGHT,
