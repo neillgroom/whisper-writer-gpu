@@ -25,10 +25,11 @@ Run tests in Floodstream
 
 Edit [`src/control_config.yaml`](src/control_config.yaml) to match local repo paths and
 installed CLI names. The shipped defaults expect repositories under `C:\Projects`,
-Claude Code as `claude`, and the four-way workflow as:
+Claude Code as `claude`, and invoke the existing Shepherd Factory gate as:
 
 ```powershell
-factory run four_way_review
+cd C:\Projects\shepherd-factory
+pnpm tsx src/cli.ts gate --repo C:\Projects\floodstream --base main --intent "Voice-requested four-way review"
 ```
 
 Only named commands from `control_config.yaml` can be launched by voice. Arbitrary
