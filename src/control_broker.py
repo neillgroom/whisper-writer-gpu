@@ -241,7 +241,30 @@ class WindowsController:
         self._require_windows()
         normalized = normalize_name(workflow)
         if normalized in {"four way", "four way review"}:
-            normalized = "four_way_review"
+            if not project:
+                raise ControlError("Four-way review needs a project name")
+            target = self.find_project(project)
+            factory = self.config.get("factory", {})
+            factory_root = Path(
+                os.path.expandvars(factory.get("root", r"C:\Projects\shepherd-factory"))
+            ).expanduser()
+            argv = [
+                *factory.get("gate_command", ["pnpm", "tsx", "src/cli.ts", "gate"]),
+                "--repo",
+                str(target),
+                "--base",
+                factory.get("base", "main"),
+                "--intent",
+                factory.get("intent", "Voice-requested four-way review"),
+            ]
+            command_line = subprocess.list2cmdline(argv)
+            subprocess.Popen(
+                ["cmd.exe", "/d", "/k", command_line],
+                cwd=factory_root,
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+            return f"Started four-way gate for {target.name}"
+
         argv = self._lookup("workflows", normalized)
         cwd = self.find_project(project) if project else ROOT
         subprocess.Popen(
@@ -276,10 +299,12 @@ class Broker:
 def speak(message: str) -> None:
     if os.name != "nt" or not shutil.which("powershell.exe"):
         return
+    message_encoded = base64.b64encode(message.encode("utf-8")).decode("ascii")
     script = (
         "Add-Type -AssemblyName System.Speech;"
+        f"$m=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{message_encoded}'));"
         "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-        f"$s.Speak({json.dumps(message)})"
+        "$s.Speak($m)"
     )
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     subprocess.Popen(
