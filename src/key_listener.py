@@ -412,6 +412,14 @@ class KeyListener:
         """Update activation keys from the current configuration."""
         self.load_activation_keys()
 
+    def ctrl_is_pressed(self):
+        """Return Ctrl state from the same hook event that activated Pause."""
+        return bool(
+            self.key_chord
+            and {KeyCode.CTRL_LEFT, KeyCode.CTRL_RIGHT}
+            & self.key_chord.pressed_keys
+        )
+
 class EvdevBackend(InputBackend):
     """
     Backend for handling input events using the evdev library.
