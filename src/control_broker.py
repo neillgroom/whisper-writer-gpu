@@ -25,6 +25,19 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = Path(__file__).with_name("control_config.yaml")
 
+KNOWN_APP_PATHS = {
+    "vs code": (
+        r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe",
+        r"%PROGRAMFILES%\Microsoft VS Code\Code.exe",
+        r"%PROGRAMFILES(X86)%\Microsoft VS Code\Code.exe",
+    ),
+    "chrome": (
+        r"%PROGRAMFILES%\Google\Chrome\Application\chrome.exe",
+        r"%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe",
+        r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+    ),
+}
+
 
 class ControlError(RuntimeError):
     pass
@@ -131,10 +144,36 @@ class WindowsController:
             raise ControlError(f"More than one project matches {name}")
         raise ControlError(f"Project not found: {name}")
 
+    def _resolve_app(self, app: str, command: Any) -> tuple[str | list[str], bool]:
+        """Resolve an app before reporting success; Popen alone is not proof."""
+        if isinstance(command, list):
+            executable = str(command[0])
+            if os.path.isabs(executable) and not os.path.isfile(executable):
+                raise ControlError(f"Configured executable is missing: {executable}")
+            if not os.path.isabs(executable) and not shutil.which(executable):
+                raise ControlError(f"Configured executable is not on PATH: {executable}")
+            return command, False
+
+        if os.path.isabs(command) and os.path.isfile(command):
+            return command, False
+        if shutil.which(command):
+            # Command shims such as code.cmd need cmd.exe; real .exe files do not.
+            return command, command.casefold().endswith((".cmd", ".bat"))
+
+        for candidate in KNOWN_APP_PATHS.get(normalize_name(app), ()):
+            expanded = os.path.expandvars(candidate)
+            if os.path.isfile(expanded):
+                return expanded, False
+
+        raise ControlError(
+            f"Could not find {app}. Install it or set its exact executable path in control_config.yaml"
+        )
+
     def open_app(self, app: str) -> str:
         self._require_windows()
         command = self._lookup("apps", app)
-        subprocess.Popen(command, shell=isinstance(command, str))
+        resolved, use_shell = self._resolve_app(app, command)
+        subprocess.Popen(resolved, shell=use_shell)
         return f"Opened {app}"
 
     def open_project(self, project: str) -> str:
@@ -297,7 +336,18 @@ class Broker:
 
 
 def speak(message: str) -> None:
-    if os.name != "nt" or not shutil.which("powershell.exe"):
+    if os.name != "nt":
+        return
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        powershell = os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"),
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe",
+        )
+    if not os.path.isfile(powershell):
         return
     message_encoded = base64.b64encode(message.encode("utf-8")).decode("ascii")
     script = (
@@ -308,7 +358,7 @@ def speak(message: str) -> None:
     )
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
     subprocess.Popen(
-        ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", encoded],
+        [powershell, "-NoProfile", "-WindowStyle", "Hidden", "-EncodedCommand", encoded],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
