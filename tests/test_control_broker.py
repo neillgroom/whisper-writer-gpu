@@ -57,6 +57,14 @@ class IntentParserTests(unittest.TestCase):
 
 
 class DispatchTests(unittest.TestCase):
+    @mock.patch("control_broker.os.name", "nt")
+    @mock.patch("control_broker.shutil.which", return_value=None)
+    @mock.patch("control_broker.os.path.isfile", return_value=False)
+    def test_open_app_rejects_missing_command_instead_of_claiming_success(self, _isfile, _which):
+        controller = WindowsController({"apps": {"VS Code": "code"}})
+        with self.assertRaisesRegex(ControlError, "Could not find VS Code"):
+            controller.open_app("VS Code")
+
     def test_route_dispatches_one_permitted_tool(self):
         broker = Broker({"speak_responses": False})
         broker.controller = mock.Mock(spec=WindowsController)
