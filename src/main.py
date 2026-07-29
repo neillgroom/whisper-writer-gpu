@@ -153,6 +153,7 @@ class WhisperWriterApp(QObject):
 
         # Ctrl+Pause is the explicit command channel. Pause alone remains dictation.
         self.recording_target = 'command' if self.key_listener.ctrl_is_pressed() else 'dictation'
+        print(f'Voice activation: {self.recording_target.upper()} mode')
         self.start_result_thread()
 
     def on_deactivation(self):
@@ -193,6 +194,7 @@ class WhisperWriterApp(QObject):
         try:
             response = self.command_broker.route(command)
             message = response.get('message', 'Done')
+            print(f'Helene command result: {message}')
             self.tray_icon.showMessage(
                 'Helene',
                 message,
@@ -200,6 +202,7 @@ class WhisperWriterApp(QObject):
                 3000,
             )
         except (BrokerError, OSError, ValueError) as error:
+            print(f'Helene command failed: {error}')
             self.tray_icon.showMessage(
                 'Helene command failed',
                 str(error),
