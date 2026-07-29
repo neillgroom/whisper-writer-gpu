@@ -1,0 +1,46 @@
+# Edit these aliases once; voice commands stay short and deterministic.
+project_roots:
+  - C:\Projects
+  - "%USERPROFILE%\\Projects"
+
+projects:
+  Floodstream: C:\Projects\floodstream
+  Shepherd Factory: C:\Projects\shepherd-factory
+
+apps:
+  VS Code: code
+  Chrome: chrome
+  Windows Terminal: wt
+  PowerShell: powershell
+
+project_editor: code
+
+agents:
+  Claude Code: claude
+  Antigravity: agy
+  Grok: grok
+
+# Only named commands are voice-runnable. Arbitrary dictated shell is intentionally
+# not executed.
+commands:
+  tests:
+    - powershell.exe
+    - -NoExit
+    - -Command
+    - pytest
+  git status:
+    - powershell.exe
+    - -NoExit
+    - -Command
+    - git status
+
+# Point this at the existing Factory command if its installed name differs.
+workflows:
+  four_way_review:
+    - powershell.exe
+    - -NoExit
+    - -Command
+    - factory run four_way_review
+
+speak_responses: true
+
