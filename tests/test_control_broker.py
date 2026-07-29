@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -63,6 +64,27 @@ class DispatchTests(unittest.TestCase):
         result = broker.dispatch("route", {"text": "open VS Code"})
         broker.controller.open_app.assert_called_once_with(app="VS Code")
         self.assertEqual(result["message"], "Opened VS Code")
+
+    @mock.patch("control_broker.subprocess.Popen")
+    @mock.patch("control_broker.os.name", "nt")
+    def test_four_way_uses_real_shepherd_gate(self, popen):
+        controller = WindowsController(
+            {
+                "factory": {
+                    "root": r"C:\Projects\shepherd-factory",
+                    "gate_command": ["pnpm", "tsx", "src/cli.ts", "gate"],
+                    "base": "main",
+                    "intent": "Voice-requested four-way review",
+                }
+            }
+        )
+        controller.find_project = mock.Mock(return_value=Path(r"C:\Projects\floodstream"))
+        result = controller.run_workflow("four way review", "Floodstream")
+        command = popen.call_args.args[0][-1]
+        self.assertIn("src/cli.ts gate", command)
+        self.assertIn("--repo", command)
+        self.assertIn("--intent", command)
+        self.assertEqual(result, "Started four-way gate for floodstream")
 
 
 if __name__ == "__main__":
