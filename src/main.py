@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 
@@ -12,11 +13,11 @@ import ctranslate2  # noqa: E402  initialize CUDA before PyQt/pynput poison the 
 import faster_whisper  # noqa: E402
 
 from audioplayer import AudioPlayer
-from pynput.keyboard import Controller
 from PyQt5.QtCore import QObject, QProcess
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
 
+from command_client import BrokerError, CommandBrokerClient
 from key_listener import KeyListener
 from result_thread import ResultThread
 from ui.main_window import MainWindow
@@ -42,6 +43,9 @@ class WhisperWriterApp(QObject):
         self.settings_window.settings_closed.connect(self.on_settings_closed)
         self.settings_window.settings_saved.connect(self.restart_app)
 
+        self.command_broker = None
+        self.recording_target = 'dictation'
+
         if ConfigManager.config_file_exists():
             self.initialize_components()
         else:
@@ -53,6 +57,7 @@ class WhisperWriterApp(QObject):
         Initialize the components of the application.
         """
         self.input_simulator = InputSimulator()
+        self.command_broker = CommandBrokerClient()
 
         self.key_listener = KeyListener()
         self.key_listener.add_callback("on_activate", self.on_activation)
@@ -101,10 +106,13 @@ class WhisperWriterApp(QObject):
         self.tray_icon.show()
 
     def cleanup(self):
-        if self.key_listener:
+        if getattr(self, 'key_listener', None):
             self.key_listener.stop()
-        if self.input_simulator:
+        if getattr(self, 'input_simulator', None):
             self.input_simulator.cleanup()
+        if self.command_broker:
+            self.command_broker.close()
+            self.command_broker = None
 
     def exit_app(self):
         """
@@ -143,6 +151,9 @@ class WhisperWriterApp(QObject):
                 self.stop_result_thread()
             return
 
+        # Ctrl+Pause is the explicit command channel. Pause alone remains dictation.
+        self.recording_target = 'command' if self.key_listener.ctrl_is_pressed() else 'dictation'
+        print(f'Voice activation: {self.recording_target.upper()} mode')
         self.start_result_thread()
 
     def on_deactivation(self):
@@ -174,11 +185,44 @@ class WhisperWriterApp(QObject):
         if self.result_thread and self.result_thread.isRunning():
             self.result_thread.stop()
 
+    @staticmethod
+    def strip_helene_prefix(result):
+        match = re.match(r'^\s*helene[\s,;:!-]*(.*)$', result, flags=re.IGNORECASE)
+        return match.group(1).strip() if match else None
+
+    def handle_command(self, command):
+        try:
+            response = self.command_broker.route(command)
+            message = response.get('message', 'Done')
+            print(f'Helene command result: {message}')
+            self.tray_icon.showMessage(
+                'Helene',
+                message,
+                QSystemTrayIcon.Information,
+                3000,
+            )
+        except (BrokerError, OSError, ValueError) as error:
+            print(f'Helene command failed: {error}')
+            self.tray_icon.showMessage(
+                'Helene command failed',
+                str(error),
+                QSystemTrayIcon.Critical,
+                5000,
+            )
+
     def on_transcription_complete(self, result):
         """
-        When the transcription is complete, type the result and start listening for the activation key again.
+        Route commands to the broker; otherwise type the transcription at the cursor.
         """
-        self.input_simulator.typewrite(result)
+        prefixed_command = self.strip_helene_prefix(result)
+        if self.recording_target == 'command' or prefixed_command is not None:
+            command = prefixed_command if prefixed_command is not None else result.strip()
+            if command:
+                self.handle_command(command)
+        else:
+            self.input_simulator.typewrite(result)
+
+        self.recording_target = 'dictation'
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
             AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)

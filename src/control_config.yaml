@@ -1,0 +1,52 @@
+# Edit these aliases once; voice commands stay short and deterministic.
+project_roots:
+  - C:\Projects
+  - "%USERPROFILE%\\Projects"
+
+projects:
+  Floodstream: C:\Projects\floodstream
+  Shepherd Factory: C:\Projects\shepherd-factory
+
+apps:
+  VS Code: code
+  Chrome: chrome
+  Windows Terminal: wt
+  PowerShell: powershell
+
+project_editor: code
+
+agents:
+  Claude Code: claude
+  Antigravity: agy
+  Grok: grok
+
+# Only named commands are voice-runnable. Arbitrary dictated shell is intentionally
+# not executed.
+commands:
+  tests:
+    - powershell.exe
+    - -NoExit
+    - -Command
+    - pytest
+  git status:
+    - powershell.exe
+    - -NoExit
+    - -Command
+    - git status
+
+# The existing Shepherd Factory 4-way gate. The broker adds:
+# --repo <resolved project> --base <base> --intent <intent>
+factory:
+  root: C:\Projects\shepherd-factory
+  gate_command:
+    - pnpm
+    - tsx
+    - src/cli.ts
+    - gate
+  base: main
+  intent: Voice-requested four-way review
+
+# Additional named workflows can be added here.
+workflows: {}
+
+speak_responses: true
