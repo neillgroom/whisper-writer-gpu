@@ -177,7 +177,7 @@ class WindowsController:
         self._require_windows()
         command = self._lookup("apps", app)
         resolved, use_shell = self._resolve_app(app, command)
-        subprocess.Popen(resolved, shell=use_shell)
+        self._launch_app(resolved, use_shell)
         return f"Opened {app}"
 
     def _launch_app(self, resolved: str | list[str], use_shell: bool, *arguments: str) -> None:
