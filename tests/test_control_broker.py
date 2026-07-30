@@ -7,6 +7,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from control_broker import Broker, ControlError, IntentParser, WindowsController, strip_wake_word
+from key_listener import InputEvent, KeyChord, KeyCode, KeyListener
 
 
 class IntentParserTests(unittest.TestCase):
@@ -50,6 +51,15 @@ class IntentParserTests(unittest.TestCase):
                 {"workflow": "four way review", "project": "Floodstream"},
             ),
         )
+
+    def test_modifier_state_is_cleared_after_ctrl_pause_recording(self):
+        listener = KeyListener.__new__(KeyListener)
+        listener.key_chord = KeyChord({KeyCode.PAUSE})
+        listener.key_chord.pressed_keys.update(
+            {KeyCode.PAUSE, KeyCode.CTRL_LEFT, KeyCode.SHIFT_LEFT}
+        )
+        listener.clear_modifier_state()
+        self.assertEqual(listener.key_chord.pressed_keys, {KeyCode.PAUSE})
 
     def test_arbitrary_shell_is_rejected(self):
         with self.assertRaises(ControlError):
