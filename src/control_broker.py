@@ -156,9 +156,13 @@ class WindowsController:
 
         if os.path.isabs(command) and os.path.isfile(command):
             return command, False
-        if shutil.which(command):
-            # Command shims such as code.cmd need cmd.exe; real .exe files do not.
-            return command, command.casefold().endswith((".cmd", ".bat"))
+
+        resolved = shutil.which(command)
+        if resolved:
+            # On Windows, VS Code normally resolves to code.cmd. Launch the
+            # resolved shim through cmd.exe; a bare command with shell=False
+            # raises WinError 2.
+            return resolved, resolved.casefold().endswith((".cmd", ".bat"))
 
         for candidate in KNOWN_APP_PATHS.get(normalize_name(app), ()):
             expanded = os.path.expandvars(candidate)
@@ -176,11 +180,22 @@ class WindowsController:
         subprocess.Popen(resolved, shell=use_shell)
         return f"Opened {app}"
 
+    def _launch_app(self, resolved: str | list[str], use_shell: bool, *arguments: str) -> None:
+        if use_shell:
+            command = subprocess.list2cmdline([str(resolved), *arguments])
+            subprocess.Popen(command, shell=True)
+            return
+        if isinstance(resolved, list):
+            subprocess.Popen([*resolved, *arguments])
+            return
+        subprocess.Popen([resolved, *arguments])
+
     def open_project(self, project: str) -> str:
         self._require_windows()
         path = self.find_project(project)
         editor = self.config.get("project_editor", "code")
-        subprocess.Popen([editor, str(path)])
+        resolved, use_shell = self._resolve_app("project editor", editor)
+        self._launch_app(resolved, use_shell, str(path))
         return f"Opened {path.name}"
 
     def type_text(self, text: str) -> str:
