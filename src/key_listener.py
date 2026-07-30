@@ -397,6 +397,23 @@ class KeyListener:
             self._trigger_callbacks("on_activate")
         elif was_active and not is_active:
             self._trigger_callbacks("on_deactivate")
+            # Ctrl+Pause is a mode selector, not a persistent mode. Clear
+            # modifiers after Pause is released so a lost Ctrl-up event cannot
+            # route all later Pause dictation as commands.
+            if key == KeyCode.PAUSE and event_type == InputEvent.KEY_RELEASE:
+                self.clear_modifier_state()
+
+    def clear_modifier_state(self):
+        """Discard transient modifiers after a completed Ctrl+Pause recording."""
+        if not self.key_chord:
+            return
+        modifiers = {
+            KeyCode.CTRL_LEFT, KeyCode.CTRL_RIGHT,
+            KeyCode.SHIFT_LEFT, KeyCode.SHIFT_RIGHT,
+            KeyCode.ALT_LEFT, KeyCode.ALT_RIGHT,
+            KeyCode.META_LEFT, KeyCode.META_RIGHT,
+        }
+        self.key_chord.pressed_keys.difference_update(modifiers)
 
     def add_callback(self, event: str, callback: Callable):
         """Add a callback function for a specific event."""
