@@ -65,6 +65,29 @@ class DispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ControlError, "Could not find VS Code"):
             controller.open_app("VS Code")
 
+    @mock.patch("control_broker.subprocess.Popen")
+    @mock.patch("control_broker.os.name", "nt")
+    @mock.patch("control_broker.shutil.which", return_value=r"C:\\Users\\Neill\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.cmd")
+    def test_open_app_uses_resolved_windows_command_shim(self, _which, popen):
+        controller = WindowsController({"apps": {"VS Code": "code"}})
+        controller.open_app("VS Code")
+        popen.assert_called_once_with(
+            r"C:\\Users\\Neill\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.cmd",
+            shell=True,
+        )
+
+    @mock.patch("control_broker.subprocess.Popen")
+    @mock.patch("control_broker.os.name", "nt")
+    @mock.patch("control_broker.shutil.which", return_value=r"C:\\Users\\Neill\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.cmd")
+    def test_open_project_uses_resolved_windows_command_shim(self, _which, popen):
+        controller = WindowsController({"project_editor": "code"})
+        controller.find_project = mock.Mock(return_value=Path(r"C:\\Projects\\floodstream"))
+        controller.open_project("Floodstream")
+        command = popen.call_args.args[0]
+        self.assertIn("code.cmd", command)
+        self.assertIn(r"C:\\Projects\\floodstream", command)
+        self.assertTrue(popen.call_args.kwargs["shell"])
+
     def test_route_dispatches_one_permitted_tool(self):
         broker = Broker({"speak_responses": False})
         broker.controller = mock.Mock(spec=WindowsController)
