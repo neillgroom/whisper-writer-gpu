@@ -23,8 +23,11 @@ class StatusWindow(BaseWindow):
         """
         Initialize the status user interface.
         """
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        
+        # Never take focus: the wake path types only into the window that was in front
+        # when the wake word was heard, and checks that before every keystroke.
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+
         status_layout = QHBoxLayout()
         status_layout.setContentsMargins(0, 0, 0, 0)
 

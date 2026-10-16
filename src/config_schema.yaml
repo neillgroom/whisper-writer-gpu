@@ -124,6 +124,38 @@ recording_options:
     type: int
     description: "The minimum duration in milliseconds for a recording to be processed. Recordings shorter than this will be discarded."
 
+# Hands-free wake word: say the phrase while an allowed window (a terminal) is in front,
+# speak, and the transcript is typed there when you stop talking. Never auto-submits.
+wake_options:
+  enabled:
+    value: false
+    type: bool
+    description: "Listen for the wake word. Needs the model files: run `python src\\wake_setup.py` once."
+  wake_model:
+    value: hey_jarvis_v0.1
+    type: str
+    description: "Wake model file name in models/wake/, without .onnx."
+  threshold:
+    value: 0.4
+    type: float
+    description: "Detection score (0 to 1) a wake word must reach. Lower hears quieter speech but fires more by accident."
+  allowed_processes:
+    value: WindowsTerminal.exe
+    type: str
+    description: "Comma-separated program names that may receive wake dictation. The wake word does nothing in any other window."
+  laptop_match:
+    value: Microphone Array
+    type: str
+    description: "Part of the microphone's name (as Windows lists it) to listen on."
+  no_speech_timeout_ms:
+    value: 4000
+    type: int
+    description: "After the wake word, stop and type nothing if no speech starts within this many milliseconds."
+  max_recording_s:
+    value: 60
+    type: int
+    description: "Hard limit in seconds for one wake recording."
+
 # Post-processing options for the transcribed text
 post_processing:
   writing_key_press_delay:

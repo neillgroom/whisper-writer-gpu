@@ -1,6 +1,10 @@
 # --- PRIVATE: verbatim record of everything you have ever dictated. Never commit. ---
 history.log
 
+# Wake-word model files: openWakeWord's pre-trained models are CC BY-NC-SA 4.0.
+# Fetched once by `python src\wake_setup.py`; never committed to this MIT repo.
+models/
+
 # Runtime logs
 worker.log
 *.err

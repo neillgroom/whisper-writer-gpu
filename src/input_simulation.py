@@ -51,33 +51,49 @@ class InputSimulator:
             os.kill(self.dotool_process.pid, signal.SIGINT)
             self.dotool_process = None
 
-    def typewrite(self, text):
+    def typewrite(self, text, should_continue=None):
         """
         Simulate typing the given text with the specified interval between keystrokes.
 
         Args:
             text (str): The text to type.
+            should_continue (callable): Optional check run before every keystroke; typing
+                stops at the first False.
+
+        Returns:
+            str: The part of `text` that was not typed ('' when all of it was).
         """
         interval = ConfigManager.get_config_value('post_processing', 'writing_key_press_delay')
         if self.input_method == 'pynput':
-            self._typewrite_pynput(text, interval)
-        elif self.input_method == 'ydotool':
+            return self._typewrite_pynput(text, interval, should_continue)
+        # ydotool/dotool type the whole string in one call, so the check can only run once.
+        if should_continue is not None and not should_continue():
+            return text
+        if self.input_method == 'ydotool':
             self._typewrite_ydotool(text, interval)
         elif self.input_method == 'dotool':
             self._typewrite_dotool(text, interval)
+        return ''
 
-    def _typewrite_pynput(self, text, interval):
+    def _typewrite_pynput(self, text, interval, should_continue=None):
         """
         Simulate typing using pynput.
 
         Args:
             text (str): The text to type.
             interval (float): The interval between keystrokes in seconds.
+            should_continue (callable): Optional check run before every keystroke.
+
+        Returns:
+            str: The untyped remainder.
         """
-        for char in text:
+        for index, char in enumerate(text):
+            if should_continue is not None and not should_continue():
+                return text[index:]
             self.keyboard.press(char)
             self.keyboard.release(char)
             time.sleep(interval)
+        return ''
 
     def _typewrite_ydotool(self, text, interval):
         """

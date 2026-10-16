@@ -10,6 +10,7 @@ from PyQt5.QtCore import QThread, QMutex, pyqtSignal
 from collections import deque
 from threading import Event
 
+from audio_devices import extra_settings
 from transcription import transcribe
 from utils import ConfigManager
 
@@ -33,14 +34,18 @@ class ResultThread(QThread):
     statusSignal = pyqtSignal(str)
     resultSignal = pyqtSignal(str)
 
-    def __init__(self, local_model=None):
+    def __init__(self, local_model=None, source='key', device=None):
         """
         Initialize the ResultThread.
 
         :param local_model: Local transcription model (if applicable)
+        :param source: 'key' for the activation key, 'wake' for the wake word
+        :param device: input device index for a wake recording; key recordings use the configured device
         """
         super().__init__()
         self.local_model = local_model
+        self.source = source
+        self.device = device
         self.is_recording = False
         self.is_running = True
         self.sample_rate = None
@@ -132,12 +137,25 @@ class ResultThread(QThread):
         # 150ms delay before starting VAD to avoid mistaking the sound of key pressing for voice
         initial_frames_to_skip = int(0.15 * self.sample_rate / frame_size)
 
+        # A wake recording is always one-shot VAD with its own deadlines, whatever the
+        # configured mode: nobody is holding a key to end it.
+        is_wake = self.source == 'wake'
+        if is_wake:
+            wake_options = ConfigManager.get_config_section('wake_options')
+            recording_mode = 'voice_activity_detection'
+            device = self.device
+            no_speech_deadline = (wake_options.get('no_speech_timeout_ms') or 4000) / 1000.0
+            hard_deadline = wake_options.get('max_recording_s') or 60
+        else:
+            recording_mode = recording_options.get('recording_mode') or 'continuous'
+            device = recording_options.get('sound_device')
+        started = time.monotonic()
+
         # Create VAD only for recording modes that use it
-        recording_mode = recording_options.get('recording_mode') or 'continuous'
         vad = None
+        speech_detected = False
         if recording_mode in ('voice_activity_detection', 'continuous'):
             vad = webrtcvad.Vad(2)  # VAD aggressiveness: 0 to 3, 3 being the most aggressive
-            speech_detected = False
             silent_frame_count = 0
 
         audio_buffer = deque(maxlen=frame_size)
@@ -152,10 +170,23 @@ class ResultThread(QThread):
             data_ready.set()
 
         with sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
-                            blocksize=frame_size, device=recording_options.get('sound_device'),
+                            blocksize=frame_size, device=device,
+                            extra_settings=extra_settings(device) if is_wake else None,
                             callback=audio_callback):
             while self.is_running and self.is_recording:
-                data_ready.wait()
+                # Bounded wait: a stalled callback (Bluetooth drop) must not hang the loop
+                # past the wake deadlines.
+                got_data = data_ready.wait(timeout=0.25)
+                if is_wake:
+                    elapsed = time.monotonic() - started
+                    if not speech_detected and elapsed > no_speech_deadline:
+                        ConfigManager.console_print('Wake recording: no speech before the deadline.')
+                        return None
+                    if elapsed > hard_deadline:
+                        ConfigManager.console_print('Wake recording: hit the maximum length.')
+                        break
+                if not got_data:
+                    continue
                 data_ready.clear()
 
                 if len(audio_buffer) < frame_size:
