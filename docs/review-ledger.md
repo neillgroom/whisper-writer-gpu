@@ -10,3 +10,4 @@ One line per board: tag · headSha · real or seat-failure · open P0/P1 · SUMM
 - [wake-word plan b3/3] 604abd2 · seat-failure (Cursor failed → Antigravity failover) · 3 open P1 at cap → Neill; he approved fixing in plan without board 4; 9 findings FIXED in cc2b766 · `4way-runs\2026-10-16T17-20-47-202Z-30664`
 - Chunk 0 (2026-10-16): machine half PASS (stack, shared mic, synthetic clips); Neill's live laptop-mic run PASS (12/12 wakes he made, 0 false wakes reported, Pause dictation worked alongside). AirPods run still owed.
 - [wake-word c1 b1/3] 6e8045b · seat-failure (Cursor failed → Antigravity failover) · author=opus · 9 findings (4 P1), all FIXED in 6b74ba1 · `4way-runs\2026-10-16T19-36-04-318Z-60820`
+- [wake-word c1 b2/3] 4cec14c · seat-failure (Cursor failed → Antigravity failover) · Codex+Antigravity APPROVE_WITH_NITS, Grok BLOCK · 7 findings (1 P1), all FIXED in 1232ffd · `4way-runs\2026-10-16T20-02-52-204Z-53628`
