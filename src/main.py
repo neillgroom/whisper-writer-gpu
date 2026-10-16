@@ -94,6 +94,7 @@ class WhisperWriterApp(QObject):
 
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.status_window = StatusWindow()
+            self.status_window.closeSignal.connect(self.stop_result_thread)
 
         self.create_tray_icon()
         # Tray-only launch: skip the main-window popup and auto-arm the hotkey listener.
@@ -145,7 +146,10 @@ class WhisperWriterApp(QObject):
         self.start_result_thread(source='wake', device=self.wake_device, hwnd=hwnd)
 
     def on_wake_error(self, message):
-        self.wake_listener = None
+        # The listener thread is exiting. Drop the reference only once it has finished:
+        # destroying a QThread that is still running aborts the whole process.
+        if self.wake_listener and self.wake_listener.wait(2000):
+            self.wake_listener = None
         self.notify('Wake word stopped', message, warning=True)
 
     def create_tray_icon(self):
@@ -172,8 +176,7 @@ class WhisperWriterApp(QObject):
         self.tray_icon.show()
 
     def cleanup(self):
-        if self.wake_listener:
-            self.wake_listener.stop()
+        if self.wake_listener and self.wake_listener.stop():
             self.wake_listener = None
         if self.key_listener:
             self.key_listener.stop()
@@ -242,7 +245,6 @@ class WhisperWriterApp(QObject):
         self.gate.begin(source, self.result_thread, hwnd)
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.result_thread.statusSignal.connect(self.status_window.updateStatus)
-            self.status_window.closeSignal.connect(self.stop_result_thread)
         self.result_thread.resultSignal.connect(self.on_transcription_complete)
         # finished fires on every exit path (result, too short, no speech, error, stop),
         # so the recorder is always released and the wake path re-armed.

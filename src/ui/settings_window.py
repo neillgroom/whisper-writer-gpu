@@ -166,11 +166,6 @@ class SettingsWindow(BaseWindow):
             value = ConfigManager.get_config_value(category, key)
         return meta['value'] if value is None else value
 
-    def showEvent(self, event):
-        """Re-read every widget from the live config, so a save never writes back stale values."""
-        self.update_widgets_from_config()
-        super().showEvent(event)
-
     def browse_model_path(self, widget):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Whisper Model File", "", "Model Files (*.bin);;All Files (*)")
         if file_path:

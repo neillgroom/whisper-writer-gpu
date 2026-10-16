@@ -78,6 +78,12 @@ class WakeRecordingTests(unittest.TestCase):
         self.assertIsNone(audio)
         self.assertLess(elapsed, 0.9)
 
+    def test_configured_zero_is_kept_not_replaced_by_the_default(self):
+        set_config(0, 'wake_options', 'no_speech_timeout_ms')
+        audio, elapsed, _ = run_record(ResultThread(source='wake', device=5), speech=False)
+        self.assertIsNone(audio)
+        self.assertLess(elapsed, 0.5)  # the 4000 ms default would take 4 s
+
     def test_wake_uses_its_device_with_wasapi_auto_convert(self):
         _, _, stream = run_record(ResultThread(source='wake', device=5), speech=False)
         self.assertEqual(stream.kwargs['device'], 5)

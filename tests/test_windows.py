@@ -1,7 +1,7 @@
 import unittest
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QCheckBox
+from PyQt5.QtWidgets import QCheckBox, QLineEdit
 
 from _support import qt_app, set_config
 from utils import ConfigManager
@@ -19,15 +19,23 @@ class SettingsWindowTests(unittest.TestCase):
         meta = {'value': True}
         self.assertIs(self.SettingsWindow.get_config_value(None, 'misc', None, 'print_to_terminal', meta), False)
 
-    def test_opening_the_window_rereads_the_live_config(self):
-        set_config(False, 'wake_options', 'enabled')
+    def test_wake_options_render_with_existing_widget_types(self):
         window = self.SettingsWindow()
-        checkbox = window.findChild(QCheckBox, 'wake_options_enabled_input')
-        self.assertIsNotNone(checkbox)
-        self.assertFalse(checkbox.isChecked())
-        set_config(True, 'wake_options', 'enabled')  # e.g. written by the tray while the window existed
+        self.assertIsNotNone(window.findChild(QCheckBox, 'wake_options_enabled_input'))
+        for key in ('wake_model', 'threshold', 'allowed_processes', 'laptop_match',
+                    'no_speech_timeout_ms', 'max_recording_s'):
+            self.assertIsNotNone(window.findChild(QLineEdit, f'wake_options_{key}_input'), key)
+
+    def test_showing_again_keeps_unsaved_edits(self):
+        # Re-reading config on every show wiped unsaved edits and the env-held API key.
+        window = self.SettingsWindow()
+        field = window.findChild(QLineEdit, 'model_options_api_api_key_input')
+        self.assertIsNotNone(field)
+        field.setText('sk-typed-but-not-saved')
         window.show()
-        self.assertTrue(checkbox.isChecked())
+        window.hide()
+        window.show()
+        self.assertEqual(field.text(), 'sk-typed-but-not-saved')
         window.hide()
         ConfigManager.reload_config()
 

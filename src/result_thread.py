@@ -144,8 +144,11 @@ class ResultThread(QThread):
             wake_options = ConfigManager.get_config_section('wake_options')
             recording_mode = 'voice_activity_detection'
             device = self.device
-            no_speech_deadline = (wake_options.get('no_speech_timeout_ms') or 4000) / 1000.0
-            hard_deadline = wake_options.get('max_recording_s') or 60
+            no_speech_ms = wake_options.get('no_speech_timeout_ms')
+            hard_deadline = wake_options.get('max_recording_s')
+            # `is None`, not `or`: a configured 0 is a real (if strict) value.
+            no_speech_deadline = (4000 if no_speech_ms is None else no_speech_ms) / 1000.0
+            hard_deadline = 60 if hard_deadline is None else hard_deadline
         else:
             recording_mode = recording_options.get('recording_mode') or 'continuous'
             device = recording_options.get('sound_device')
