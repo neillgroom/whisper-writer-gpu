@@ -14,6 +14,8 @@ from audio_devices import extra_settings
 from transcription import transcribe
 from utils import ConfigManager
 
+WAKE_TAIL_GUARD_S = 0.4  # start of a wake recording ignored as the tail of the wake word
+
 
 class ResultThread(QThread):
     """
@@ -147,12 +149,16 @@ class ResultThread(QThread):
             no_speech_ms = wake_options.get('no_speech_timeout_ms')
             hard_deadline = wake_options.get('max_recording_s')
             # `is None`, not `or`: a configured 0 is a real (if strict) value.
-            no_speech_deadline = (4000 if no_speech_ms is None else no_speech_ms) / 1000.0
+            # The no-speech window opens when the wake-word guard below closes.
+            no_speech_deadline = WAKE_TAIL_GUARD_S + (4000 if no_speech_ms is None else no_speech_ms) / 1000.0
             hard_deadline = 60 if hard_deadline is None else hard_deadline
+            # The detector fires as "Jarvis" ends, so the first moments of a wake recording
+            # are the tail of the wake word. Neither record them nor let them count as speech;
+            # otherwise a short pause after the wake word would type the tail.
+            initial_frames_to_skip = int(WAKE_TAIL_GUARD_S * self.sample_rate / frame_size)
         else:
             recording_mode = recording_options.get('recording_mode') or 'continuous'
             device = recording_options.get('sound_device')
-        started = time.monotonic()
 
         # Create VAD only for recording modes that use it
         vad = None
@@ -176,6 +182,9 @@ class ResultThread(QThread):
                             blocksize=frame_size, device=device,
                             extra_settings=extra_settings(device) if is_wake else None,
                             callback=audio_callback):
+            # Deadlines count from when the mic is actually open; opening a Bluetooth
+            # input can take a noticeable part of a second.
+            started = time.monotonic()
             while self.is_running and self.is_recording:
                 # Bounded wait: a stalled callback (Bluetooth drop) must not hang the loop
                 # past the wake deadlines.
@@ -186,6 +195,8 @@ class ResultThread(QThread):
                         ConfigManager.console_print('Wake recording: no speech before the deadline.')
                         return None
                     if elapsed > hard_deadline:
+                        if not speech_detected:
+                            return None
                         ConfigManager.console_print('Wake recording: hit the maximum length.')
                         break
                 if not got_data:
@@ -198,12 +209,14 @@ class ResultThread(QThread):
                 # Save frame
                 frame = np.array(list(audio_buffer), dtype=np.int16)
                 audio_buffer.clear()
-                recording.extend(frame)
 
                 # Avoid trying to detect voice in initial frames
                 if initial_frames_to_skip > 0:
                     initial_frames_to_skip -= 1
+                    if not is_wake:
+                        recording.extend(frame)
                     continue
+                recording.extend(frame)
 
                 if vad:
                     if vad.is_speech(frame.tobytes(), self.sample_rate):

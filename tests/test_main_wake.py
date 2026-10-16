@@ -86,6 +86,37 @@ class KeyIsolationTests(unittest.TestCase):
         self.assertEqual(app.started, [])
 
 
+class CleanupTests(unittest.TestCase):
+    def bare_app(self):
+        app = SimpleNamespace(key_listener=None, input_simulator=None, result_thread=None,
+                              wake_listener=None, stopped=[])
+        app.stop_result_thread = lambda: app.stopped.append(True)
+        return app
+
+    def test_cleanup_before_components_exist(self):
+        # First run: the settings window can restart the app before initialize_components().
+        app = self.bare_app()
+        WhisperWriterApp.cleanup(app)
+        self.assertEqual(app.stopped, [True])
+
+    def test_listener_that_will_not_stop_is_terminated_before_exit(self):
+        app = self.bare_app()
+        listener = mock.Mock()
+        listener.stop.return_value = False
+        app.wake_listener = listener
+        WhisperWriterApp.cleanup(app)
+        listener.terminate.assert_called_once()
+        self.assertIsNone(app.wake_listener)
+
+    def test_listener_that_stops_is_not_terminated(self):
+        app = self.bare_app()
+        listener = mock.Mock()
+        listener.stop.return_value = True
+        app.wake_listener = listener
+        WhisperWriterApp.cleanup(app)
+        listener.terminate.assert_not_called()
+
+
 class TranscriptTests(unittest.TestCase):
     def setUp(self):
         set_config(False, 'misc', 'noise_on_completion')

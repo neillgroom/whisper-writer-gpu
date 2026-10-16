@@ -52,6 +52,13 @@ class WhisperWriterApp(QObject):
 
         ConfigManager.initialize()
 
+        # Set before anything can call cleanup(): on a first run the settings window
+        # can restart the app before initialize_components() ever runs.
+        self.key_listener = None
+        self.input_simulator = None
+        self.result_thread = None
+        self.wake_listener = None
+
         self.settings_window = SettingsWindow()
         self.settings_window.settings_closed.connect(self.on_settings_closed)
         self.settings_window.settings_saved.connect(self.restart_app)
@@ -176,8 +183,15 @@ class WhisperWriterApp(QObject):
         self.tray_icon.show()
 
     def cleanup(self):
-        if self.wake_listener and self.wake_listener.stop():
+        if self.wake_listener:
+            if not self.wake_listener.stop():
+                # The process is exiting and the audio device would not let go even after
+                # abort. A QThread still running when Qt destroys it aborts the process,
+                # so end it here as the last resort.
+                self.wake_listener.terminate()
+                self.wake_listener.wait(1000)
             self.wake_listener = None
+        self.stop_result_thread()
         if self.key_listener:
             self.key_listener.stop()
         if self.input_simulator:

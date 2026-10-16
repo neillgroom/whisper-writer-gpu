@@ -78,6 +78,32 @@ class WakeRecordingTests(unittest.TestCase):
         self.assertIsNone(audio)
         self.assertLess(elapsed, 0.9)
 
+    def test_hard_cap_without_any_speech_types_nothing(self):
+        set_config(5000, 'wake_options', 'no_speech_timeout_ms')
+        audio, elapsed, _ = run_record(ResultThread(source='wake', device=5), speech=False)
+        self.assertIsNone(audio)
+        self.assertLess(elapsed, 1.6)
+
+    def test_wake_word_tail_is_neither_recorded_nor_counted_as_speech(self):
+        # Constant "speech" for 1 s: the first 0.4 s is the guard and is dropped.
+        audio, _, _ = run_record(ResultThread(source='wake', device=5), speech=True)
+        self.assertLess(len(audio), int(0.75 * 16000))
+
+    def test_deadlines_start_after_the_mic_opens(self):
+        FakeStream.instances.clear()
+
+        def slow_open(**kw):
+            time.sleep(0.6)  # a Bluetooth input taking its time to open
+            return FakeStream(**kw)
+
+        thread = ResultThread(source='wake', device=5)
+        thread.is_running = thread.is_recording = True
+        with mock.patch.object(result_thread.sd, 'InputStream', slow_open), \
+             mock.patch.object(result_thread.webrtcvad, 'Vad', lambda a: FakeVad(False)):
+            started = time.monotonic()
+            self.assertIsNone(thread._record_audio())
+        self.assertGreaterEqual(time.monotonic() - started, 0.6 + 0.3)
+
     def test_configured_zero_is_kept_not_replaced_by_the_default(self):
         set_config(0, 'wake_options', 'no_speech_timeout_ms')
         audio, elapsed, _ = run_record(ResultThread(source='wake', device=5), speech=False)

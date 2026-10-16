@@ -48,5 +48,15 @@ class PynputStartTests(unittest.TestCase):
         self.assertEqual(FakeListener.created, 4)
 
 
+    def test_a_dead_mouse_hook_alone_also_triggers_a_clean_restart(self):
+        backend = self.backend()
+        backend.start()
+        old_keyboard = backend.keyboard_listener
+        backend.mouse_listener.running = False
+        backend.start()
+        self.assertTrue(old_keyboard.stopped)
+        self.assertEqual(FakeListener.created, 4)
+
+
 if __name__ == '__main__':
     unittest.main()

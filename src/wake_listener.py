@@ -22,6 +22,7 @@ from audio_devices import extra_settings
 SAMPLE_RATE = 16000
 FRAME = 1280  # 80 ms, openWakeWord's native frame
 POLL_S = 0.25  # longest the listener loop goes without checking whether it should stop
+MAX_BACKLOG = 25  # frames (2 s) of audio waiting for detection before new frames are dropped
 MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models', 'wake')
 FEATURE_FILES = ('melspectrogram.onnx', 'embedding_model.onnx')
 
@@ -92,32 +93,54 @@ class WakeListener(QThread):
         self.device = device
         self.open_stream = open_stream
         self._running = True
+        self._stream = None
 
     def stop(self):
-        """Ask the loop to exit and wait for the thread to finish. Returns True once it has."""
+        """
+        Ask the loop to exit and wait for the thread to finish. If the device hangs
+        while closing, abort the stream to unblock it. Returns True once the thread
+        has finished.
+        """
         self._running = False
-        return self.wait(int(POLL_S * 1000) * 8)
+        if self.wait(int(POLL_S * 1000) * 8):
+            return True
+        stream = self._stream
+        if stream is not None:
+            try:
+                stream.abort()
+            except Exception:  # already closed or the device is gone; the wait below decides
+                pass
+        return self.wait(2000)
 
     def run(self):
-        frames = queue.Queue()
+        # Bounded: if detection ever falls behind, old audio is dropped rather than
+        # detected late. Each frame carries its capture time, and that time (not the
+        # processing time) is what the main thread compares against its re-arm point.
+        frames = queue.Queue(maxsize=MAX_BACKLOG)
 
         def callback(indata, frame_count, time_info, status):
-            frames.put(indata[:, 0].copy())
+            try:
+                frames.put_nowait((time.monotonic(), indata[:, 0].copy()))
+            except queue.Full:
+                pass
 
         try:
             with self.open_stream(samplerate=SAMPLE_RATE, channels=1, dtype='int16', blocksize=FRAME,
                                   device=self.device, extra_settings=extra_settings(self.device),
                                   callback=callback) as stream:
+                self._stream = stream
                 while self._running:
                     try:
-                        frame = frames.get(timeout=POLL_S)
+                        captured_at, frame = frames.get(timeout=POLL_S)
                     except queue.Empty:
                         if not stream.active:
                             raise RuntimeError('The microphone stream stopped.')
                         continue
                     score = self.detector.process(frame)
                     if score is not None:
-                        self.wakeSignal.emit(time.monotonic(), score)
+                        self.wakeSignal.emit(captured_at, score)
         except Exception as error:  # the device went away or the stream could not open
             if self._running:
                 self.errorSignal.emit(str(error) or error.__class__.__name__)
+        finally:
+            self._stream = None

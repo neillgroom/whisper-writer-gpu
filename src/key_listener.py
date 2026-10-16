@@ -765,7 +765,8 @@ class PynputBackend(InputBackend):
         """Start listening for keyboard and mouse events. Safe to call repeatedly."""
         # The app re-arms the listener after every transcription. Without this guard each
         # call installed another low-level hook and the old ones were never removed.
-        if self.keyboard_listener is not None and self.keyboard_listener.running:
+        listeners = (self.keyboard_listener, self.mouse_listener)
+        if all(listener is not None and listener.running for listener in listeners):
             return
         self.stop()
         if self.keyboard is None or self.mouse is None:

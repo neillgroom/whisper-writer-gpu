@@ -85,6 +85,51 @@ class WakeListenerTests(unittest.TestCase):
         self.assertTrue(wake.wait(2000))
         self.assertEqual(errors, ['device unavailable'])
 
+    def test_detection_carries_the_capture_time_not_the_processing_time(self):
+        class Slow:
+            calls = 0
+
+            def process(self, frame):
+                Slow.calls += 1
+                time.sleep(0.15)  # detection falling behind real time
+                return 0.9 if Slow.calls == 4 else None
+
+        wake, _, _ = listener(lambda **kw: FakeStream(frames=40, **kw), detector=Slow())
+        stamps = []
+        wake.wakeSignal.connect(lambda at, score: stamps.append((at, time.monotonic())), Qt.DirectConnection)
+        wake.start()
+        time.sleep(0.9)
+        self.assertTrue(wake.stop())
+        self.assertEqual(len(stamps), 1)
+        captured_at, emitted_at = stamps[0]
+        self.assertGreater(emitted_at - captured_at, 0.3)
+
+    def test_stop_aborts_a_stream_that_hangs_while_closing(self):
+        class HangsOnClose(FakeStream):
+            def __init__(self, **kw):
+                super().__init__(frames=0, **kw)
+                self.released = threading.Event()
+                self.aborted = False
+
+            def abort(self):
+                self.aborted = True
+                self.released.set()
+
+            def __exit__(self, *exc):
+                self.released.wait(10)
+
+        streams = []
+
+        def factory(**kw):
+            streams.append(HangsOnClose(**kw))
+            return streams[-1]
+
+        wake, _, _ = listener(factory)
+        wake.start()
+        time.sleep(0.1)
+        self.assertTrue(wake.stop())
+        self.assertTrue(streams[0].aborted)
+
     def test_stream_opens_the_resolved_device_with_auto_convert(self):
         opened = {}
 
