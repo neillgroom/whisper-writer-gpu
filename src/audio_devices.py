@@ -7,6 +7,8 @@ input only while it is connected; a miss is the normal disconnected state.
 """
 import sounddevice as sd
 
+from utils import ConfigManager
+
 
 def resolve_input(substring, devices=None, hostapis=None):
     """
@@ -24,7 +26,9 @@ def resolve_input(substring, devices=None, hostapis=None):
     matches = [i for i, d in enumerate(devices)
                if d['hostapi'] == wasapi and d['max_input_channels'] > 0 and needle in d['name'].lower()]
     if len(matches) > 1:
-        print(f'Mic "{substring}" matched devices {matches}; using {matches[0]}: {devices[matches[0]]["name"]}')
+        # console_print, not print: launched via pythonw.exe, bare stdout is discarded.
+        ConfigManager.console_print(
+            f'Mic "{substring}" matched devices {matches}; using {matches[0]}: {devices[matches[0]]["name"]}')
     return matches[0] if matches else None
 
 

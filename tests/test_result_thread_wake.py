@@ -55,6 +55,43 @@ def run_record(thread, feed=True, speech=False):
         return audio, time.monotonic() - started, FakeStream.instances[-1]
 
 
+class StopAbortTests(unittest.TestCase):
+    """ResultThread.stop() must return even if the mic close hangs (dropped Bluetooth)."""
+
+    def setUp(self):
+        set_config('press_to_toggle', 'recording_options', 'recording_mode')
+        set_config(None, 'recording_options', 'sound_device')
+
+    def test_stop_aborts_a_hung_close_and_returns(self):
+        released = threading.Event()
+        aborted = {'called': False}
+
+        class HangsOnClose:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                released.wait(10)  # the device won't let go until abort()
+
+            def abort(self, ignore_errors=False):
+                aborted['called'] = True
+                released.set()
+
+        thread = ResultThread(source='key', device=None)
+        with mock.patch.object(result_thread.sd, 'InputStream', lambda **kw: HangsOnClose(**kw)), \
+             mock.patch.object(result_thread.webrtcvad, 'Vad', lambda a: FakeVad(False)):
+            thread.start()
+            time.sleep(0.3)
+            began = time.monotonic()
+            thread.stop()               # would block forever without the abort path
+            self.assertLess(time.monotonic() - began, 6.0)
+            self.assertTrue(aborted['called'])
+            self.assertTrue(thread.isFinished())
+
+
 class WakeRecordingTests(unittest.TestCase):
     def setUp(self):
         set_config(300, 'wake_options', 'no_speech_timeout_ms')

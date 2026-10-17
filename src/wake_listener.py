@@ -113,17 +113,24 @@ class WakeListener(QThread):
         return self.wait(2000)
 
     def run(self):
-        # Bounded: if detection ever falls behind, old audio is dropped rather than
-        # detected late. Each frame carries its capture time, and that time (not the
-        # processing time) is what the main thread compares against its re-arm point.
+        # Bounded: if detection ever falls behind, the OLDEST queued frame is dropped to
+        # make room for the newest, so the most recent audio (where a live wake word is)
+        # is kept rather than discarded. Each frame carries its capture time, and that
+        # time (not the processing time) is what the main thread compares against re-arm.
         frames = queue.Queue(maxsize=MAX_BACKLOG)
 
         def callback(indata, frame_count, time_info, status):
+            item = (time.monotonic(), indata[:, 0].copy())
             try:
-                frames.put_nowait((time.monotonic(), indata[:, 0].copy()))
+                frames.put_nowait(item)
             except queue.Full:
-                pass
+                try:
+                    frames.get_nowait()       # drop the oldest
+                    frames.put_nowait(item)   # keep the newest
+                except queue.Empty:
+                    pass
 
+        stream = None
         try:
             with self.open_stream(samplerate=SAMPLE_RATE, channels=1, dtype='int16', blocksize=FRAME,
                                   device=self.device, extra_settings=extra_settings(self.device),
@@ -140,6 +147,13 @@ class WakeListener(QThread):
                     if score is not None:
                         self.wakeSignal.emit(captured_at, score)
         except Exception as error:  # the device went away or the stream could not open
+            # Abort from this thread so a wedged device cannot keep the stream's
+            # context manager from returning; then report it.
+            if stream is not None:
+                try:
+                    stream.abort(ignore_errors=True)
+                except Exception:
+                    pass
             if self._running:
                 self.errorSignal.emit(str(error) or error.__class__.__name__)
         finally:

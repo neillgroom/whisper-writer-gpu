@@ -117,13 +117,15 @@ class WhisperWriterApp(QObject):
         wake_options = ConfigManager.get_config_section('wake_options')
         if not wake_options.get('enabled'):
             return
-        device = resolve_input(wake_options.get('laptop_match'))
-        if device is None:
-            self.notify('Wake word off', f'No connected mic matches "{wake_options.get("laptop_match")}".', warning=True)
-            return
         try:
+            # Device enumeration itself can throw if the audio backend is unhappy; keep it
+            # inside the guard so any failure disables wake rather than taking down dictation.
+            device = resolve_input(wake_options.get('laptop_match'))
+            if device is None:
+                self.notify('Wake word off', f'No connected mic matches "{wake_options.get("laptop_match")}".', warning=True)
+                return
             detector = load_detector(wake_options.get('wake_model'), float(wake_options.get('threshold')))
-        except Exception as error:  # missing files or an unloadable model must not take down dictation
+        except Exception as error:  # missing files, an unloadable model, or an audio-backend failure
             self.notify('Wake word off', str(error), warning=True)
             return
         self.wake_device = device

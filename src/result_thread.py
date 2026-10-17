@@ -52,6 +52,7 @@ class ResultThread(QThread):
         self.is_running = True
         self.sample_rate = None
         self.mutex = QMutex()
+        self._stream = None
 
     def stop_recording(self):
         """Stop the current recording session."""
@@ -60,12 +61,26 @@ class ResultThread(QThread):
         self.mutex.unlock()
 
     def stop(self):
-        """Stop the entire thread execution."""
+        """
+        Stop the entire thread execution. Waits with a timeout, then aborts the input
+        stream so a hung mic close (a dropped Bluetooth device) can never block shutdown
+        forever. Without this the thread never emits `finished`, the recorder gate stays
+        busy, and app exit hangs.
+        """
         self.mutex.lock()
         self.is_running = False
+        self.is_recording = False
         self.mutex.unlock()
         self.statusSignal.emit('idle')
-        self.wait()
+        if self.wait(2000):
+            return
+        stream = self._stream
+        if stream is not None:
+            try:
+                stream.abort(ignore_errors=True)
+            except Exception:
+                pass
+        self.wait(2000)
 
     def run(self):
         """Main execution method for the thread."""
@@ -181,7 +196,8 @@ class ResultThread(QThread):
         with sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
                             blocksize=frame_size, device=device,
                             extra_settings=extra_settings(device) if is_wake else None,
-                            callback=audio_callback):
+                            callback=audio_callback) as stream:
+            self._stream = stream
             # Deadlines count from when the mic is actually open; opening a Bluetooth
             # input can take a noticeable part of a second.
             started = time.monotonic()
