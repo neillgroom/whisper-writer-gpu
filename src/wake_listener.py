@@ -9,8 +9,10 @@ thread decides whether a wake is accepted (see wake_gate.WakeGate).
 The model files are fetched once by `python src/wake_setup.py` into models/wake/
 and loaded here by path; this module never touches the network.
 """
+import ctypes
 import os
 import queue
+import sys
 import time
 
 import numpy as np
@@ -18,11 +20,15 @@ import sounddevice as sd
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from audio_devices import extra_settings
+from utils import ConfigManager
 
 SAMPLE_RATE = 16000
 FRAME = 1280  # 80 ms, openWakeWord's native frame
 POLL_S = 0.25  # longest the listener loop goes without checking whether it should stop
 MAX_BACKLOG = 25  # frames (2 s) of audio waiting for detection before new frames are dropped
+RETRY_BACKOFF_S = 1.0    # wait between reopen attempts after a stream failure
+STALL_TIMEOUT_S = 3.0    # no frames for this long while the stream claims "active" => reopen
+WARN_AFTER_FAILURES = 3  # consecutive failures before a one-time tray warning
 MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'models', 'wake')
 FEATURE_FILES = ('melspectrogram.onnx', 'embedding_model.onnx')
 
@@ -64,6 +70,11 @@ class WakeDetector:
             return None
         self.armed = True
         return None
+
+    def reset(self):
+        """Clear any buffered audio context; called on every (re)open of the stream."""
+        self.model.reset()
+        self.armed = True
 
 
 def load_detector(wake_model, threshold, model_dir=MODEL_DIR):
@@ -112,49 +123,106 @@ class WakeListener(QThread):
                 pass
         return self.wait(2000)
 
+    def _com_initialize(self):
+        """
+        A Qt GUI app puts the main thread's COM apartment in STA. A worker thread that
+        opens a WASAPI/PortAudio stream must initialize COM on ITS OWN thread, or
+        PortAudio's device scan fails with a WDM-KS host error (-9999) on every open.
+        Verified on Neill's laptop 2026-10-17: without this the wake stream never opens
+        inside the app, though it opens fine from a main-thread script.
+
+        Returns True when this thread now holds a COM reference that run() must release.
+        """
+        if sys.platform != 'win32':
+            return False
+        COINIT_MULTITHREADED = 0x0  # a background audio thread needs no message pump
+        hr = ctypes.windll.ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
+        # S_OK (0) and S_FALSE (1, already initialized here) both require a CoUninitialize;
+        # RPC_E_CHANGED_MODE (negative) means someone else set a different apartment -- do not.
+        return hr in (0, 1)
+
     def run(self):
-        # Bounded: if detection ever falls behind, the OLDEST queued frame is dropped to
-        # make room for the newest, so the most recent audio (where a live wake word is)
-        # is kept rather than discarded. Each frame carries its capture time, and that
-        # time (not the processing time) is what the main thread compares against re-arm.
-        frames = queue.Queue(maxsize=MAX_BACKLOG)
-
-        def callback(indata, frame_count, time_info, status):
-            item = (time.monotonic(), indata[:, 0].copy())
-            try:
-                frames.put_nowait(item)
-            except queue.Full:
-                try:
-                    frames.get_nowait()       # drop the oldest
-                    frames.put_nowait(item)   # keep the newest
-                except queue.Empty:
-                    pass
-
-        stream = None
+        com_held = self._com_initialize()
         try:
-            with self.open_stream(samplerate=SAMPLE_RATE, channels=1, dtype='int16', blocksize=FRAME,
-                                  device=self.device, extra_settings=extra_settings(self.device),
-                                  callback=callback) as stream:
-                self._stream = stream
-                while self._running:
-                    try:
-                        captured_at, frame = frames.get(timeout=POLL_S)
-                    except queue.Empty:
-                        if not stream.active:
-                            raise RuntimeError('The microphone stream stopped.')
-                        continue
-                    score = self.detector.process(frame)
-                    if score is not None:
-                        self.wakeSignal.emit(captured_at, score)
-        except Exception as error:  # the device went away or the stream could not open
-            # Abort from this thread so a wedged device cannot keep the stream's
-            # context manager from returning; then report it.
-            if stream is not None:
-                try:
-                    stream.abort(ignore_errors=True)
-                except Exception:
-                    pass
-            if self._running:
-                self.errorSignal.emit(str(error) or error.__class__.__name__)
+            self._run()
         finally:
-            self._stream = None
+            if com_held:
+                ctypes.windll.ole32.CoUninitialize()
+
+    def _run(self):
+        # Supervised, always-on: open the stream, detect until stop() or a failure,
+        # then (unless stopping) log it, back off, and reopen. A single transient host
+        # error or a silent stall must not permanently kill wake-word -- an always-on
+        # listener recovers. The thread exits only when stop() clears self._running.
+        consecutive_failures = 0
+        warned = False
+        while self._running:
+            # Bounded: if detection ever falls behind, the OLDEST queued frame is dropped
+            # to make room for the newest, so the most recent audio (where a live wake word
+            # is) is kept. Each frame carries its capture time, and that time (not the
+            # processing time) is what the main thread compares against re-arm.
+            frames = queue.Queue(maxsize=MAX_BACKLOG)
+
+            def callback(indata, frame_count, time_info, status):
+                item = (time.monotonic(), indata[:, 0].copy())
+                try:
+                    frames.put_nowait(item)
+                except queue.Full:
+                    try:
+                        frames.get_nowait()       # drop the oldest
+                        frames.put_nowait(item)   # keep the newest
+                    except queue.Empty:
+                        pass
+
+            stream = None
+            try:
+                self.detector.reset()  # drop any audio buffered before this (re)open
+                with self.open_stream(samplerate=SAMPLE_RATE, channels=1, dtype='int16', blocksize=FRAME,
+                                      device=self.device, extra_settings=extra_settings(self.device),
+                                      callback=callback) as stream:
+                    self._stream = stream
+                    ConfigManager.console_print('Wake listener: microphone stream open.')
+                    if warned:
+                        ConfigManager.console_print('Wake listener: recovered.')
+                        warned = False
+                    consecutive_failures = 0
+                    last_frame_at = time.monotonic()
+                    while self._running:
+                        try:
+                            captured_at, frame = frames.get(timeout=POLL_S)
+                        except queue.Empty:
+                            # No frames: a dead or silently stalled stream must trigger a reopen.
+                            if not stream.active or (time.monotonic() - last_frame_at) > STALL_TIMEOUT_S:
+                                raise RuntimeError('the microphone stream stalled')
+                            continue
+                        last_frame_at = time.monotonic()
+                        score = self.detector.process(frame)
+                        if score is not None:
+                            self.wakeSignal.emit(captured_at, score)
+            except Exception as error:  # open failed, or the stream died / stalled mid-run
+                # Abort from this thread so a wedged device cannot keep the context
+                # manager from returning.
+                if stream is not None:
+                    try:
+                        stream.abort(ignore_errors=True)
+                    except Exception:
+                        pass
+                if not self._running:
+                    break
+                consecutive_failures += 1
+                ConfigManager.console_print(
+                    f'Wake listener: stream error ({error}); reopening in {RETRY_BACKOFF_S:.0f}s '
+                    f'(attempt {consecutive_failures}).')
+                # One tray warning once the trouble is persistent -- not for a blip that self-heals.
+                if consecutive_failures == WARN_AFTER_FAILURES:
+                    warned = True
+                    self.errorSignal.emit(
+                        f"Wake word can't reach the microphone ({error}). Still retrying.")
+                # Back off, but stay responsive to stop().
+                waited = 0.0
+                while self._running and waited < RETRY_BACKOFF_S:
+                    time.sleep(0.1)
+                    waited += 0.1
+            finally:
+                self._stream = None
+        ConfigManager.console_print('Wake listener: stopped.')

@@ -1,11 +1,14 @@
+import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 from PyQt5.QtCore import Qt
 
 from _support import qt_app
+import wake_listener
 from wake_listener import FRAME, WakeListener
 
 
@@ -42,6 +45,25 @@ class AlwaysFires:
         self.calls += 1
         return 0.9 if self.calls == 2 else None
 
+    def reset(self):
+        pass
+
+
+class FlakyFactory:
+    """Raises on the first `fail_times` opens, then returns a FakeStream."""
+
+    def __init__(self, fail_times, frames=0, error=None):
+        self.fail_times = fail_times
+        self.frames = frames
+        self.error = error or OSError('Unanticipated host error [-9999]')
+        self.opens = 0
+
+    def __call__(self, **kw):
+        self.opens += 1
+        if self.opens <= self.fail_times:
+            raise self.error
+        return FakeStream(frames=self.frames, **kw)
+
 
 def listener(stream_factory, detector=None):
     qt_app()
@@ -61,7 +83,7 @@ class WakeListenerTests(unittest.TestCase):
         self.assertEqual(wakes, [0.9])
         self.assertEqual(errors, [])
 
-    def test_stalled_device_still_stops_promptly(self):
+    def test_stop_returns_promptly_when_no_frames_arrive(self):
         # No frames ever arrive (Bluetooth stall). stop() must not hang on the device.
         wake, _, errors = listener(lambda **kw: FakeStream(frames=0, **kw))
         wake.start()
@@ -71,19 +93,61 @@ class WakeListenerTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertEqual(errors, [])
 
-    def test_dead_stream_reports_an_error_and_the_thread_ends(self):
-        wake, _, errors = listener(lambda **kw: FakeStream(frames=0, active=False, **kw))
-        wake.start()
-        self.assertTrue(wake.wait(2000))
-        self.assertEqual(len(errors), 1)
+    def test_a_transient_open_failure_is_retried_and_then_works(self):
+        factory = FlakyFactory(fail_times=1, frames=5)
+        with mock.patch.object(wake_listener, 'RETRY_BACKOFF_S', 0.02):
+            wake, wakes, errors = listener(factory)
+            wake.start()
+            time.sleep(0.4)
+            self.assertTrue(wake.stop())
+        self.assertEqual(factory.opens, 2)     # failed once, then reopened
+        self.assertEqual(wakes, [0.9])         # detection works after recovery
+        self.assertEqual(errors, [])           # one failure < WARN_AFTER_FAILURES: no toast
 
-    def test_open_failure_reports_an_error(self):
-        def refuse(**kw):
-            raise OSError('device unavailable')
-        wake, _, errors = listener(refuse)
-        wake.start()
-        self.assertTrue(wake.wait(2000))
-        self.assertEqual(errors, ['device unavailable'])
+    def test_persistent_open_failure_warns_once_but_keeps_retrying(self):
+        factory = FlakyFactory(fail_times=10_000)  # never succeeds
+        with mock.patch.object(wake_listener, 'RETRY_BACKOFF_S', 0.02):
+            wake, _, errors = listener(factory)
+            wake.start()
+            time.sleep(0.4)
+            running_mid = wake.isRunning()
+            self.assertTrue(wake.stop())
+        self.assertTrue(running_mid)                 # did NOT die on the failures
+        self.assertGreaterEqual(factory.opens, 3)    # kept retrying
+        self.assertEqual(len(errors), 1)             # exactly one tray warning, at the threshold
+
+    def test_an_inactive_stream_triggers_a_reopen(self):
+        # A stream that opens but is never active (silent death) must be reopened, not fatal.
+        opens = {'n': 0}
+
+        def factory(**kw):
+            opens['n'] += 1
+            return FakeStream(frames=0, active=False, **kw)
+        with mock.patch.object(wake_listener, 'RETRY_BACKOFF_S', 0.02), \
+             mock.patch.object(wake_listener, 'POLL_S', 0.05):
+            wake, _, _ = listener(factory)
+            wake.start()
+            time.sleep(0.4)
+            running_mid = wake.isRunning()
+            self.assertTrue(wake.stop())
+        self.assertTrue(running_mid)
+        self.assertGreaterEqual(opens['n'], 2)       # reopened after the dead stream
+
+    def test_a_stalled_but_active_stream_is_reopened(self):
+        # The stream claims active=True but delivers no frames: reopen after STALL_TIMEOUT_S.
+        opens = {'n': 0}
+
+        def factory(**kw):
+            opens['n'] += 1
+            return FakeStream(frames=0, active=True, **kw)
+        with mock.patch.object(wake_listener, 'STALL_TIMEOUT_S', 0.1), \
+             mock.patch.object(wake_listener, 'POLL_S', 0.02), \
+             mock.patch.object(wake_listener, 'RETRY_BACKOFF_S', 0.02):
+            wake, _, _ = listener(factory)
+            wake.start()
+            time.sleep(0.4)
+            self.assertTrue(wake.stop())
+        self.assertGreaterEqual(opens['n'], 2)       # the stall forced a reopen
 
     def test_detection_carries_the_capture_time_not_the_processing_time(self):
         class Slow:
@@ -93,6 +157,9 @@ class WakeListenerTests(unittest.TestCase):
                 Slow.calls += 1
                 time.sleep(0.15)  # detection falling behind real time
                 return 0.9 if Slow.calls == 4 else None
+
+            def reset(self):
+                pass
 
         wake, _, _ = listener(lambda **kw: FakeStream(frames=40, **kw), detector=Slow())
         stamps = []
@@ -111,7 +178,7 @@ class WakeListenerTests(unittest.TestCase):
                 self.released = threading.Event()
                 self.aborted = False
 
-            def abort(self):
+            def abort(self, ignore_errors=False):
                 self.aborted = True
                 self.released.set()
 
@@ -129,6 +196,22 @@ class WakeListenerTests(unittest.TestCase):
         time.sleep(0.1)
         self.assertTrue(wake.stop())
         self.assertTrue(streams[0].aborted)
+
+    @unittest.skipUnless(sys.platform == 'win32', 'COM init is Windows-only')
+    def test_com_is_initialized_on_the_worker_thread_and_released(self):
+        # Without CoInitialize on this thread, PortAudio's WASAPI open fails with a
+        # WDM-KS host error under a Qt GUI app. run() must init COM and release it.
+        fake_ole = mock.Mock()
+        fake_ole.CoInitializeEx.return_value = 0
+        fake_ctypes = mock.Mock()
+        fake_ctypes.windll.ole32 = fake_ole
+        with mock.patch.object(wake_listener, 'ctypes', fake_ctypes):
+            wake, _, _ = listener(lambda **kw: FakeStream(frames=0, **kw))
+            wake.start()
+            time.sleep(0.1)
+            self.assertTrue(wake.stop())
+        self.assertTrue(fake_ole.CoInitializeEx.called)
+        self.assertTrue(fake_ole.CoUninitialize.called)
 
     def test_stream_opens_the_resolved_device_with_auto_convert(self):
         opened = {}

@@ -155,11 +155,11 @@ class WhisperWriterApp(QObject):
         self.start_result_thread(source='wake', device=self.wake_device, hwnd=hwnd)
 
     def on_wake_error(self, message):
-        # The listener thread is exiting. Drop the reference only once it has finished:
-        # destroying a QThread that is still running aborts the whole process.
-        if self.wake_listener and self.wake_listener.wait(2000):
-            self.wake_listener = None
-        self.notify('Wake word stopped', message, warning=True)
+        # The listener now self-recovers, so this signal is a persistent-trouble
+        # warning, not the thread exiting. Just surface it: the thread is still
+        # running and retrying, and is torn down only by cleanup()/stop(). Dropping
+        # the reference here (as the old one-shot model did) would leak a live thread.
+        self.notify('Wake word trouble', message, warning=True)
 
     def create_tray_icon(self):
         """
