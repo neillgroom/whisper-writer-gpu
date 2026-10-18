@@ -119,14 +119,12 @@ class WhisperWriterApp(QObject):
             return
         match = wake_options.get('laptop_match')
         try:
-            # Device enumeration itself can throw if the audio backend is unhappy; keep it
-            # inside the guard so any failure disables wake rather than taking down dictation.
-            device = resolve_input(match)
-            if device is None:
-                self.notify('Wake word off', f'No connected mic matches "{match}".', warning=True)
-                return
+            # Only an UNRECOVERABLE problem disables wake here: missing or unloadable model files.
+            # A missing mic is NOT disabling -- the listener resolves by name on every open and
+            # retries, so a mic absent at startup (or a Bluetooth device connected later) is picked
+            # up without restarting the app.
             detector = load_detector(wake_options.get('wake_model'), float(wake_options.get('threshold')))
-        except Exception as error:  # missing files, an unloadable model, or an audio-backend failure
+        except Exception as error:  # missing files or an unloadable model
             self.notify('Wake word off', str(error), warning=True)
             return
         # Resolve BY NAME on every (re)open, not once: a Bluetooth mic's index changes across
@@ -138,7 +136,7 @@ class WhisperWriterApp(QObject):
         self.wake_listener.wakeSignal.connect(self.on_wake)
         self.wake_listener.errorSignal.connect(self.on_wake_error)
         self.wake_listener.start()
-        ConfigManager.console_print(f'Wake listener started on device {device}.')
+        ConfigManager.console_print(f'Wake listener started (current device {self._resolve_wake_device()}).')
 
     def notify(self, title, message, warning=False):
         icon = QSystemTrayIcon.Warning if warning else QSystemTrayIcon.Information
@@ -164,6 +162,7 @@ class WhisperWriterApp(QObject):
             self.notify('Wake word error', f'Microphone lookup failed: {error}', warning=True)
             return
         if device is None:
+            ConfigManager.console_print('Wake detected, but no microphone is connected to record on; ignoring.')
             return
         ConfigManager.console_print(f'Wake word detected (score {score:.2f}).')
         self.start_result_thread(source='wake', device=device, hwnd=hwnd)
