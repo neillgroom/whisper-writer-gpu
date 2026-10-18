@@ -25,11 +25,19 @@ def resolve_input(substring, devices=None, hostapis=None):
     needle = substring.lower()
     matches = [i for i, d in enumerate(devices)
                if d['hostapi'] == wasapi and d['max_input_channels'] > 0 and needle in d['name'].lower()]
-    if len(matches) > 1:
-        # console_print, not print: launched via pythonw.exe, bare stdout is discarded.
-        ConfigManager.console_print(
-            f'Mic "{substring}" matched devices {matches}; using {matches[0]}: {devices[matches[0]]["name"]}')
-    return matches[0] if matches else None
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    # Ambiguous: prefer an exact (case-insensitive) name match; else the lowest index, so the
+    # choice is deterministic rather than silently first-wins. console_print, not print: launched
+    # via pythonw.exe, bare stdout is discarded.
+    exact = [i for i in matches if devices[i]['name'].lower() == needle]
+    chosen = exact[0] if exact else matches[0]
+    ConfigManager.console_print(
+        f'Mic "{substring}" matched {len(matches)} inputs {matches}; using {chosen}: '
+        f'{devices[chosen]["name"]}. Set wake_options.laptop_match to a more specific name to disambiguate.')
+    return chosen
 
 
 def extra_settings(device):

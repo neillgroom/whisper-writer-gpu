@@ -18,6 +18,7 @@ class FakeStream:
     def __init__(self, feed=True, **kwargs):
         self.kwargs = kwargs
         self.feed = feed
+        self.aborted = False
         self._stop = threading.Event()
         FakeStream.instances.append(self)
 
@@ -27,6 +28,10 @@ class FakeStream:
         return self
 
     def __exit__(self, *exc):
+        self._stop.set()
+
+    def abort(self, ignore_errors=False):
+        self.aborted = True
         self._stop.set()
 
     def _pump(self):
@@ -103,6 +108,12 @@ class WakeRecordingTests(unittest.TestCase):
         audio, elapsed, _ = run_record(ResultThread(source='wake', device=5), speech=False)
         self.assertIsNone(audio)
         self.assertLess(elapsed, 0.9)
+
+    def test_a_wake_deadline_aborts_the_stream_before_leaving(self):
+        # Abort before the `with` closes, so a dead mic's blocking stop can't pin the thread
+        # (which would keep `finished` from firing and wedge WakeGate / the Pause key).
+        _, _, stream = run_record(ResultThread(source='wake', device=5), speech=False)
+        self.assertTrue(stream.aborted)
 
     def test_constant_speech_ends_at_the_hard_cap(self):
         audio, elapsed, _ = run_record(ResultThread(source='wake', device=5), speech=True)

@@ -207,10 +207,15 @@ class ResultThread(QThread):
                 got_data = data_ready.wait(timeout=0.25)
                 if is_wake:
                     elapsed = time.monotonic() - started
+                    # Abort (non-blocking) before leaving the `with`: on a dead Bluetooth mic the
+                    # stream's blocking stop in __exit__ would pin this thread, so run() never emits
+                    # `finished`, WakeGate never clears source, and Pause stays dead for the session.
                     if not speech_detected and elapsed > no_speech_deadline:
                         ConfigManager.console_print('Wake recording: no speech before the deadline.')
+                        stream.abort(ignore_errors=True)
                         return None
                     if elapsed > hard_deadline:
+                        stream.abort(ignore_errors=True)
                         if not speech_detected:
                             return None
                         ConfigManager.console_print('Wake recording: hit the maximum length.')
@@ -244,6 +249,7 @@ class ResultThread(QThread):
                         silent_frame_count += 1
 
                     if speech_detected and silent_frame_count > silence_frames:
+                        stream.abort(ignore_errors=True)  # same reason: don't block in close on exit
                         break
 
         audio_data = np.array(recording, dtype=np.int16)

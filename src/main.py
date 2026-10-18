@@ -85,7 +85,7 @@ class WhisperWriterApp(QObject):
 
         self.gate = WakeGate()
         self.wake_listener = None
-        self.wake_device = None
+        self._resolve_wake_device = None
         self.wake_allowed = set()
 
         model_options = ConfigManager.get_config_section('model_options')
@@ -117,20 +117,24 @@ class WhisperWriterApp(QObject):
         wake_options = ConfigManager.get_config_section('wake_options')
         if not wake_options.get('enabled'):
             return
+        match = wake_options.get('laptop_match')
         try:
             # Device enumeration itself can throw if the audio backend is unhappy; keep it
             # inside the guard so any failure disables wake rather than taking down dictation.
-            device = resolve_input(wake_options.get('laptop_match'))
+            device = resolve_input(match)
             if device is None:
-                self.notify('Wake word off', f'No connected mic matches "{wake_options.get("laptop_match")}".', warning=True)
+                self.notify('Wake word off', f'No connected mic matches "{match}".', warning=True)
                 return
             detector = load_detector(wake_options.get('wake_model'), float(wake_options.get('threshold')))
         except Exception as error:  # missing files, an unloadable model, or an audio-backend failure
             self.notify('Wake word off', str(error), warning=True)
             return
-        self.wake_device = device
+        # Resolve BY NAME on every (re)open, not once: a Bluetooth mic's index changes across
+        # reconnects, so a fixed index would make the listener's retry loop reopen a stale device
+        # forever after a drop. Returns None when the mic is gone (the listener then retries).
+        self._resolve_wake_device = lambda: resolve_input(match)
         self.wake_allowed = parse_allowed(wake_options.get('allowed_processes'))
-        self.wake_listener = WakeListener(detector, device)
+        self.wake_listener = WakeListener(detector, self._resolve_wake_device)
         self.wake_listener.wakeSignal.connect(self.on_wake)
         self.wake_listener.errorSignal.connect(self.on_wake_error)
         self.wake_listener.start()
@@ -151,8 +155,13 @@ class WhisperWriterApp(QObject):
         hwnd = foreground_window()
         if not is_allowed(hwnd, self.wake_allowed):
             return
+        # Re-resolve now, not at startup: the recording must open the mic's CURRENT index,
+        # which may have changed since the listener armed. None means the mic just vanished.
+        device = self._resolve_wake_device()
+        if device is None:
+            return
         ConfigManager.console_print(f'Wake word detected (score {score:.2f}).')
-        self.start_result_thread(source='wake', device=self.wake_device, hwnd=hwnd)
+        self.start_result_thread(source='wake', device=device, hwnd=hwnd)
 
     def on_wake_error(self, message):
         # The listener now self-recovers, so this signal is a persistent-trouble

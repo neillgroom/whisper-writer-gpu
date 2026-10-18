@@ -22,7 +22,7 @@ class FakeApp:
     def __init__(self, sender_source='key'):
         self.gate = WakeGate()
         self.wake_allowed = {'windowsterminal.exe'}
-        self.wake_device = 7
+        self._resolve_wake_device = lambda: 7
         self.result_thread = None
         self.started = []
         self.notices = []
@@ -61,6 +61,14 @@ class OnWakeTests(unittest.TestCase):
         app = FakeApp()
         with mock.patch.object(main, 'foreground_window', return_value=55), \
              mock.patch.object(main, 'is_allowed', return_value=False):
+            app.on_wake(10.0, 0.9)
+        self.assertEqual(app.started, [])
+
+    def test_mic_gone_at_wake_time_starts_nothing(self):
+        app = FakeApp()
+        app._resolve_wake_device = lambda: None  # the mic vanished between arming and the wake
+        with mock.patch.object(main, 'foreground_window', return_value=55), \
+             mock.patch.object(main, 'is_allowed', return_value=True):
             app.on_wake(10.0, 0.9)
         self.assertEqual(app.started, [])
 
