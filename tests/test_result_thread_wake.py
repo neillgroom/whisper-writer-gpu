@@ -22,12 +22,11 @@ class FakeStream:
         self._stop = threading.Event()
         FakeStream.instances.append(self)
 
-    def __enter__(self):
+    def start(self):
         if self.feed:
             threading.Thread(target=self._pump, daemon=True).start()
-        return self
 
-    def __exit__(self, *exc):
+    def close(self, ignore_errors=False):
         self._stop.set()
 
     def abort(self, ignore_errors=False):
@@ -67,7 +66,7 @@ class StopAbortTests(unittest.TestCase):
         set_config('press_to_toggle', 'recording_options', 'recording_mode')
         set_config(None, 'recording_options', 'sound_device')
 
-    def test_stop_aborts_a_hung_close_and_returns(self):
+    def test_a_hung_close_is_unblocked_by_the_abort_that_runs_first(self):
         released = threading.Event()
         aborted = {'called': False}
 
@@ -75,15 +74,15 @@ class StopAbortTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                released.wait(10)  # the device won't let go until abort()
+            def start(self):
+                pass  # no frames
 
             def abort(self, ignore_errors=False):
                 aborted['called'] = True
                 released.set()
+
+            def close(self, ignore_errors=False):
+                released.wait(10)  # would hang forever if abort had not run first in the finally
 
         thread = ResultThread(source='key', device=None)
         with mock.patch.object(result_thread.sd, 'InputStream', lambda **kw: HangsOnClose(**kw)), \

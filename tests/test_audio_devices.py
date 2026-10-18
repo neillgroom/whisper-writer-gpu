@@ -1,8 +1,10 @@
 import unittest
+from unittest import mock
 
 import sounddevice as sd
 
 import _support  # noqa: F401
+import audio_devices
 from audio_devices import extra_settings, resolve_input
 
 HOSTAPIS = [{'name': 'MME'}, {'name': 'Windows DirectSound'}, {'name': 'Windows WASAPI'}, {'name': 'Windows WDM-KS'}]
@@ -43,6 +45,15 @@ class ResolveInputTests(unittest.TestCase):
 
     def test_no_wasapi_host_returns_none(self):
         self.assertIsNone(resolve_input('Microphone', devices=DEVICES, hostapis=[{'name': 'MME'}]))
+
+    def test_an_exact_name_match_wins_the_tie(self):
+        devices = DEVICES + [dev('microphone array', 2, 2)]  # exact (case-insensitive) WASAPI input
+        self.assertEqual(self.resolve('Microphone Array', devices=devices), 7)
+
+    def test_a_backend_error_returns_none_instead_of_raising(self):
+        # A flaky backend must look like "no mic" so the listener/callback retry rather than die.
+        with mock.patch.object(audio_devices.sd, 'query_devices', side_effect=OSError('backend')):
+            self.assertIsNone(resolve_input('Microphone Array'))
 
 
 class ExtraSettingsTests(unittest.TestCase):

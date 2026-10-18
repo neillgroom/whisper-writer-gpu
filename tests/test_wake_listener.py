@@ -191,6 +191,25 @@ class WakeListenerTests(unittest.TestCase):
         self.assertEqual(opened['n'], 0)             # never tried to open a stream
         self.assertEqual(len(errors), 1)             # warned that there is no mic
 
+    def test_a_resolver_that_raises_is_treated_as_no_mic_not_a_crash(self):
+        opened = {'n': 0}
+
+        def factory(**kw):
+            opened['n'] += 1
+            return FakeStream(frames=0, **kw)
+
+        def boom():
+            raise OSError('audio backend unhappy')
+        with mock.patch.object(wake_listener, 'RETRY_BACKOFF_S', 0.02):
+            wake, _, errors = listener(factory, device=boom)
+            wake.start()
+            time.sleep(0.3)
+            running_mid = wake.isRunning()
+            self.assertTrue(wake.stop())
+        self.assertTrue(running_mid)         # the raise did NOT kill the supervised thread
+        self.assertEqual(opened['n'], 0)     # never tried to open a stream
+        self.assertEqual(len(errors), 1)     # warned once it was persistent
+
     @unittest.skipUnless(sys.platform == 'win32', 'COM init is Windows-only')
     def test_com_is_initialized_on_the_worker_thread_and_released(self):
         fake_ole = mock.Mock()

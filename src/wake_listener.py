@@ -173,7 +173,11 @@ class WakeListener(QThread):
         consecutive_failures = 0
         warned = False
         while self._running:
-            device = self._current_device()
+            try:
+                device = self._current_device()
+            except Exception as error:  # a resolver must never kill the supervised thread
+                ConfigManager.console_print(f'Wake listener: device lookup raised ({error}); treating as no mic.')
+                device = None
             if device is None:
                 # No matching mic right now (the Bluetooth device is disconnected). Treat it
                 # like any other failure so the warning still fires if it never comes back.

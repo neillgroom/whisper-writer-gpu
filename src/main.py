@@ -157,7 +157,12 @@ class WhisperWriterApp(QObject):
             return
         # Re-resolve now, not at startup: the recording must open the mic's CURRENT index,
         # which may have changed since the listener armed. None means the mic just vanished.
-        device = self._resolve_wake_device()
+        # Guard the lookup: this is a Qt slot, and an unhandled raise here would take down the app.
+        try:
+            device = self._resolve_wake_device()
+        except Exception as error:
+            self.notify('Wake word error', f'Microphone lookup failed: {error}', warning=True)
+            return
         if device is None:
             return
         ConfigManager.console_print(f'Wake word detected (score {score:.2f}).')

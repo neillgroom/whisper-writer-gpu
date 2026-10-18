@@ -193,11 +193,13 @@ class ResultThread(QThread):
             audio_buffer.extend(indata[:, 0])
             data_ready.set()
 
-        with sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
-                            blocksize=frame_size, device=device,
-                            extra_settings=extra_settings(device) if is_wake else None,
-                            callback=audio_callback) as stream:
-            self._stream = stream
+        stream = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
+                                blocksize=frame_size, device=device,
+                                extra_settings=extra_settings(device) if is_wake else None,
+                                callback=audio_callback)
+        self._stream = stream  # publish BEFORE start so stop() can abort a hung open
+        try:
+            stream.start()
             # Deadlines count from when the mic is actually open; opening a Bluetooth
             # input can take a noticeable part of a second.
             started = time.monotonic()
@@ -207,15 +209,10 @@ class ResultThread(QThread):
                 got_data = data_ready.wait(timeout=0.25)
                 if is_wake:
                     elapsed = time.monotonic() - started
-                    # Abort (non-blocking) before leaving the `with`: on a dead Bluetooth mic the
-                    # stream's blocking stop in __exit__ would pin this thread, so run() never emits
-                    # `finished`, WakeGate never clears source, and Pause stays dead for the session.
                     if not speech_detected and elapsed > no_speech_deadline:
                         ConfigManager.console_print('Wake recording: no speech before the deadline.')
-                        stream.abort(ignore_errors=True)
                         return None
                     if elapsed > hard_deadline:
-                        stream.abort(ignore_errors=True)
                         if not speech_detected:
                             return None
                         ConfigManager.console_print('Wake recording: hit the maximum length.')
@@ -249,15 +246,31 @@ class ResultThread(QThread):
                         silent_frame_count += 1
 
                     if speech_detected and silent_frame_count > silence_frames:
-                        stream.abort(ignore_errors=True)  # same reason: don't block in close on exit
                         break
+        finally:
+            # Abort (non-blocking) before close, on EVERY exit -- a wake deadline return, a break,
+            # the key-release while-exit, or an exception. A wedged mic's blocking stop in close()
+            # would otherwise pin this thread, so run() never emits `finished` and WakeGate never
+            # clears (wedging the Pause key). Publishing self._stream before start() also lets stop()
+            # abort a hung open from the main thread.
+            try:
+                stream.abort(ignore_errors=True)
+            except Exception:
+                pass
+            try:
+                stream.close(ignore_errors=True)
+            except Exception:
+                pass
+            self._stream = None
 
         audio_data = np.array(recording, dtype=np.int16)
         duration = len(audio_data) / self.sample_rate
 
         ConfigManager.console_print(f'Recording finished. Size: {audio_data.size} samples, Duration: {duration:.2f} seconds')
 
-        min_duration_ms = recording_options.get('min_duration') or 100
+        # `is None`, not `or`: a configured 0 (keep everything) is a real value, like the wake deadlines.
+        min_duration = recording_options.get('min_duration')
+        min_duration_ms = 100 if min_duration is None else min_duration
 
         if (duration * 1000) < min_duration_ms:
             ConfigManager.console_print(f'Discarded due to being too short.')
