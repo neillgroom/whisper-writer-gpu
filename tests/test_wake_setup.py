@@ -48,12 +48,24 @@ class RepairIncompletePairsTests(unittest.TestCase):
                          ['hey_jarvis_v0.1.onnx'])
         self.assertFalse(self._exists('hey_jarvis_v0.1.onnx'))
 
-    def test_zero_byte_half_counts_as_absent(self):
-        # an interrupted write leaves a 0-byte file; the real half is the non-empty one
+    def test_a_zero_byte_half_takes_the_whole_incomplete_pair(self):
+        # an interrupted write leaves a 0-byte file; the pair is incomplete, so BOTH existing
+        # files go (the 0-byte one too -- openWakeWord would still skip on its mere existence).
         self._write('embedding_model.onnx', b'')
         self._write('embedding_model.tflite', b'data')
         self.assertEqual(wake_setup.repair_incomplete_pairs(self.dir, self.names),
-                         ['embedding_model.tflite'])
+                         ['embedding_model.onnx', 'embedding_model.tflite'])
+        self.assertFalse(self._exists('embedding_model.onnx'))
+        self.assertFalse(self._exists('embedding_model.tflite'))
+
+    def test_a_zero_byte_tflite_with_no_onnx_is_removed(self):
+        # the exact interrupted-download case: a 0-byte .tflite, no .onnx. A size-only check
+        # would see "both absent" and remove nothing, but openWakeWord skips on the .tflite's
+        # existence, so it must be removed for the retry to re-fetch the pair.
+        self._write('melspectrogram.tflite', b'')
+        self.assertEqual(wake_setup.repair_incomplete_pairs(self.dir, self.names),
+                         ['melspectrogram.tflite'])
+        self.assertFalse(self._exists('melspectrogram.tflite'))
 
     def test_unrelated_vad_tflite_is_not_touched(self):
         self._write('silero_vad.tflite')  # VAD model has no .onnx sibling by design
