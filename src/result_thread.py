@@ -10,8 +10,11 @@ from PyQt5.QtCore import QThread, QMutex, pyqtSignal
 from collections import deque
 from threading import Event
 
+from audio_devices import extra_settings
 from transcription import transcribe
 from utils import ConfigManager
+
+WAKE_TAIL_GUARD_S = 0.4  # start of a wake recording ignored as the tail of the wake word
 
 
 class ResultThread(QThread):
@@ -33,18 +36,23 @@ class ResultThread(QThread):
     statusSignal = pyqtSignal(str)
     resultSignal = pyqtSignal(str)
 
-    def __init__(self, local_model=None):
+    def __init__(self, local_model=None, source='key', device=None):
         """
         Initialize the ResultThread.
 
         :param local_model: Local transcription model (if applicable)
+        :param source: 'key' for the activation key, 'wake' for the wake word
+        :param device: input device index for a wake recording; key recordings use the configured device
         """
         super().__init__()
         self.local_model = local_model
+        self.source = source
+        self.device = device
         self.is_recording = False
         self.is_running = True
         self.sample_rate = None
         self.mutex = QMutex()
+        self._stream = None
 
     def stop_recording(self):
         """Stop the current recording session."""
@@ -53,12 +61,26 @@ class ResultThread(QThread):
         self.mutex.unlock()
 
     def stop(self):
-        """Stop the entire thread execution."""
+        """
+        Stop the entire thread execution. Waits with a timeout, then aborts the input
+        stream so a hung mic close (a dropped Bluetooth device) can never block shutdown
+        forever. Without this the thread never emits `finished`, the recorder gate stays
+        busy, and app exit hangs.
+        """
         self.mutex.lock()
         self.is_running = False
+        self.is_recording = False
         self.mutex.unlock()
         self.statusSignal.emit('idle')
-        self.wait()
+        if self.wait(2000):
+            return
+        stream = self._stream
+        if stream is not None:
+            try:
+                stream.abort(ignore_errors=True)
+            except Exception:
+                pass
+        self.wait(2000)
 
     def run(self):
         """Main execution method for the thread."""
@@ -132,12 +154,32 @@ class ResultThread(QThread):
         # 150ms delay before starting VAD to avoid mistaking the sound of key pressing for voice
         initial_frames_to_skip = int(0.15 * self.sample_rate / frame_size)
 
+        # A wake recording is always one-shot VAD with its own deadlines, whatever the
+        # configured mode: nobody is holding a key to end it.
+        is_wake = self.source == 'wake'
+        if is_wake:
+            wake_options = ConfigManager.get_config_section('wake_options')
+            recording_mode = 'voice_activity_detection'
+            device = self.device
+            no_speech_ms = wake_options.get('no_speech_timeout_ms')
+            hard_deadline = wake_options.get('max_recording_s')
+            # `is None`, not `or`: a configured 0 is a real (if strict) value.
+            # The no-speech window opens when the wake-word guard below closes.
+            no_speech_deadline = WAKE_TAIL_GUARD_S + (4000 if no_speech_ms is None else no_speech_ms) / 1000.0
+            hard_deadline = 60 if hard_deadline is None else hard_deadline
+            # The detector fires as "Jarvis" ends, so the first moments of a wake recording
+            # are the tail of the wake word. Neither record them nor let them count as speech;
+            # otherwise a short pause after the wake word would type the tail.
+            initial_frames_to_skip = int(WAKE_TAIL_GUARD_S * self.sample_rate / frame_size)
+        else:
+            recording_mode = recording_options.get('recording_mode') or 'continuous'
+            device = recording_options.get('sound_device')
+
         # Create VAD only for recording modes that use it
-        recording_mode = recording_options.get('recording_mode') or 'continuous'
         vad = None
+        speech_detected = False
         if recording_mode in ('voice_activity_detection', 'continuous'):
             vad = webrtcvad.Vad(2)  # VAD aggressiveness: 0 to 3, 3 being the most aggressive
-            speech_detected = False
             silent_frame_count = 0
 
         audio_buffer = deque(maxlen=frame_size)
@@ -151,11 +193,32 @@ class ResultThread(QThread):
             audio_buffer.extend(indata[:, 0])
             data_ready.set()
 
-        with sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
-                            blocksize=frame_size, device=recording_options.get('sound_device'),
-                            callback=audio_callback):
+        stream = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
+                                blocksize=frame_size, device=device,
+                                extra_settings=extra_settings(device) if is_wake else None,
+                                callback=audio_callback)
+        self._stream = stream  # publish BEFORE start so stop() can abort a hung open
+        try:
+            stream.start()
+            # Deadlines count from when the mic is actually open; opening a Bluetooth
+            # input can take a noticeable part of a second.
+            started = time.monotonic()
             while self.is_running and self.is_recording:
-                data_ready.wait()
+                # Bounded wait: a stalled callback (Bluetooth drop) must not hang the loop
+                # past the wake deadlines.
+                got_data = data_ready.wait(timeout=0.25)
+                if is_wake:
+                    elapsed = time.monotonic() - started
+                    if not speech_detected and elapsed > no_speech_deadline:
+                        ConfigManager.console_print('Wake recording: no speech before the deadline.')
+                        return None
+                    if elapsed > hard_deadline:
+                        if not speech_detected:
+                            return None
+                        ConfigManager.console_print('Wake recording: hit the maximum length.')
+                        break
+                if not got_data:
+                    continue
                 data_ready.clear()
 
                 if len(audio_buffer) < frame_size:
@@ -164,12 +227,14 @@ class ResultThread(QThread):
                 # Save frame
                 frame = np.array(list(audio_buffer), dtype=np.int16)
                 audio_buffer.clear()
-                recording.extend(frame)
 
                 # Avoid trying to detect voice in initial frames
                 if initial_frames_to_skip > 0:
                     initial_frames_to_skip -= 1
+                    if not is_wake:
+                        recording.extend(frame)
                     continue
+                recording.extend(frame)
 
                 if vad:
                     if vad.is_speech(frame.tobytes(), self.sample_rate):
@@ -182,13 +247,30 @@ class ResultThread(QThread):
 
                     if speech_detected and silent_frame_count > silence_frames:
                         break
+        finally:
+            # Abort (non-blocking) before close, on EVERY exit -- a wake deadline return, a break,
+            # the key-release while-exit, or an exception. A wedged mic's blocking stop in close()
+            # would otherwise pin this thread, so run() never emits `finished` and WakeGate never
+            # clears (wedging the Pause key). Publishing self._stream before start() also lets stop()
+            # abort a hung open from the main thread.
+            try:
+                stream.abort(ignore_errors=True)
+            except Exception:
+                pass
+            try:
+                stream.close(ignore_errors=True)
+            except Exception:
+                pass
+            self._stream = None
 
         audio_data = np.array(recording, dtype=np.int16)
         duration = len(audio_data) / self.sample_rate
 
         ConfigManager.console_print(f'Recording finished. Size: {audio_data.size} samples, Duration: {duration:.2f} seconds')
 
-        min_duration_ms = recording_options.get('min_duration') or 100
+        # `is None`, not `or`: a configured 0 (keep everything) is a real value, like the wake deadlines.
+        min_duration = recording_options.get('min_duration')
+        min_duration_ms = 100 if min_duration is None else min_duration
 
         if (duration * 1000) < min_duration_ms:
             ConfigManager.console_print(f'Discarded due to being too short.')

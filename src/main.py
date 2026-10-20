@@ -13,10 +13,12 @@ import faster_whisper  # noqa: E402
 
 from audioplayer import AudioPlayer
 from pynput.keyboard import Controller
-from PyQt5.QtCore import QObject, QProcess
+from PyQt5.QtCore import QObject, QProcess, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QAction, QMessageBox
 
+from audio_devices import resolve_input
+from foreground import foreground_window, is_allowed, parse_allowed
 from key_listener import KeyListener
 from result_thread import ResultThread
 from ui.main_window import MainWindow
@@ -25,6 +27,18 @@ from ui.status_window import StatusWindow
 from transcription import create_local_model
 from input_simulation import InputSimulator
 from utils import ConfigManager
+from wake_gate import WakeGate
+from wake_listener import WakeListener, load_detector
+
+
+class KeyBridge(QObject):
+    """
+    KeyListener calls back on the keyboard-hook thread. Re-emitting as signals runs
+    the handlers on the Qt main thread, where all recorder state lives, and keeps
+    the low-level hook from ever waiting on app work.
+    """
+    activated = pyqtSignal()
+    deactivated = pyqtSignal()
 
 
 class WhisperWriterApp(QObject):
@@ -37,6 +51,13 @@ class WhisperWriterApp(QObject):
         self.app.setWindowIcon(QIcon(os.path.join('assets', 'ww-logo.png')))
 
         ConfigManager.initialize()
+
+        # Set before anything can call cleanup(): on a first run the settings window
+        # can restart the app before initialize_components() ever runs.
+        self.key_listener = None
+        self.input_simulator = None
+        self.result_thread = None
+        self.wake_listener = None
 
         self.settings_window = SettingsWindow()
         self.settings_window.settings_closed.connect(self.on_settings_closed)
@@ -54,9 +75,18 @@ class WhisperWriterApp(QObject):
         """
         self.input_simulator = InputSimulator()
 
+        self.key_bridge = KeyBridge()
+        self.key_bridge.activated.connect(self.on_activation)
+        self.key_bridge.deactivated.connect(self.on_deactivation)
+
         self.key_listener = KeyListener()
-        self.key_listener.add_callback("on_activate", self.on_activation)
-        self.key_listener.add_callback("on_deactivate", self.on_deactivation)
+        self.key_listener.add_callback("on_activate", self.key_bridge.activated.emit)
+        self.key_listener.add_callback("on_deactivate", self.key_bridge.deactivated.emit)
+
+        self.gate = WakeGate()
+        self.wake_listener = None
+        self._resolve_wake_device = None
+        self.wake_allowed = set()
 
         model_options = ConfigManager.get_config_section('model_options')
         model_path = model_options.get('local', {}).get('model_path')
@@ -71,11 +101,78 @@ class WhisperWriterApp(QObject):
 
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.status_window = StatusWindow()
+            self.status_window.closeSignal.connect(self.stop_result_thread)
 
         self.create_tray_icon()
         # Tray-only launch: skip the main-window popup and auto-arm the hotkey listener.
         # Summon the main window any time via the tray icon → "WhisperWriter Main Menu".
         self.key_listener.start()
+        self.start_wake_listener()
+
+    def start_wake_listener(self):
+        """
+        Start the always-on wake listener when enabled. Any failure leaves wake off
+        with a tray message; key dictation is unaffected.
+        """
+        wake_options = ConfigManager.get_config_section('wake_options')
+        if not wake_options.get('enabled'):
+            return
+        match = wake_options.get('laptop_match')
+        try:
+            # Only an UNRECOVERABLE problem disables wake here: missing or unloadable model files.
+            # A missing mic is NOT disabling -- the listener resolves by name on every open and
+            # retries, so a mic absent at startup (or a Bluetooth device connected later) is picked
+            # up without restarting the app.
+            detector = load_detector(wake_options.get('wake_model'), float(wake_options.get('threshold')))
+        except Exception as error:  # missing files or an unloadable model
+            self.notify('Wake word off', str(error), warning=True)
+            return
+        # Resolve BY NAME on every (re)open, not once: a Bluetooth mic's index changes across
+        # reconnects, so a fixed index would make the listener's retry loop reopen a stale device
+        # forever after a drop. Returns None when the mic is gone (the listener then retries).
+        self._resolve_wake_device = lambda: resolve_input(match)
+        self.wake_allowed = parse_allowed(wake_options.get('allowed_processes'))
+        self.wake_listener = WakeListener(detector, self._resolve_wake_device)
+        self.wake_listener.wakeSignal.connect(self.on_wake)
+        self.wake_listener.errorSignal.connect(self.on_wake_error)
+        self.wake_listener.start()
+        ConfigManager.console_print(f'Wake listener started (current device {self._resolve_wake_device()}).')
+
+    def notify(self, title, message, warning=False):
+        icon = QSystemTrayIcon.Warning if warning else QSystemTrayIcon.Information
+        self.tray_icon.showMessage(title, message, icon, 8000)
+
+    def on_wake(self, detected_at, score):
+        """
+        Called on the main thread for each detected wake word. Starts a one-shot
+        recording only when nothing owns the recorder, the wake is newer than the
+        last recording, and a terminal is the foreground window.
+        """
+        if not self.gate.accept_wake(detected_at):
+            return
+        hwnd = foreground_window()
+        if not is_allowed(hwnd, self.wake_allowed):
+            return
+        # Re-resolve now, not at startup: the recording must open the mic's CURRENT index,
+        # which may have changed since the listener armed. None means the mic just vanished.
+        # Guard the lookup: this is a Qt slot, and an unhandled raise here would take down the app.
+        try:
+            device = self._resolve_wake_device()
+        except Exception as error:
+            self.notify('Wake word error', f'Microphone lookup failed: {error}', warning=True)
+            return
+        if device is None:
+            ConfigManager.console_print('Wake detected, but no microphone is connected to record on; ignoring.')
+            return
+        ConfigManager.console_print(f'Wake word detected (score {score:.2f}).')
+        self.start_result_thread(source='wake', device=device, hwnd=hwnd)
+
+    def on_wake_error(self, message):
+        # The listener now self-recovers, so this signal is a persistent-trouble
+        # warning, not the thread exiting. Just surface it: the thread is still
+        # running and retrying, and is torn down only by cleanup()/stop(). Dropping
+        # the reference here (as the old one-shot model did) would leak a live thread.
+        self.notify('Wake word trouble', message, warning=True)
 
     def create_tray_icon(self):
         """
@@ -101,6 +198,15 @@ class WhisperWriterApp(QObject):
         self.tray_icon.show()
 
     def cleanup(self):
+        if self.wake_listener:
+            if not self.wake_listener.stop():
+                # The process is exiting and the audio device would not let go even after
+                # abort. A QThread still running when Qt destroys it aborts the process,
+                # so end it here as the last resort.
+                self.wake_listener.terminate()
+                self.wake_listener.wait(1000)
+            self.wake_listener = None
+        self.stop_result_thread()
         if self.key_listener:
             self.key_listener.stop()
         if self.input_simulator:
@@ -135,6 +241,8 @@ class WhisperWriterApp(QObject):
         """
         Called when the activation key combination is pressed.
         """
+        if self.gate.keys_ignored():
+            return
         if self.result_thread and self.result_thread.isRunning():
             recording_mode = ConfigManager.get_config_value('recording_options', 'recording_mode')
             if recording_mode == 'press_to_toggle':
@@ -149,23 +257,31 @@ class WhisperWriterApp(QObject):
         """
         Called when the activation key combination is released.
         """
+        if self.gate.keys_ignored():
+            return
         if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'hold_to_record':
             if self.result_thread and self.result_thread.isRunning():
                 self.result_thread.stop_recording()
 
-    def start_result_thread(self):
+    def start_result_thread(self, source='key', device=None, hwnd=None):
         """
         Start the result thread to record audio and transcribe it.
         """
         if self.result_thread and self.result_thread.isRunning():
             return
 
-        self.result_thread = ResultThread(self.local_model)
+        self.result_thread = ResultThread(self.local_model, source=source, device=device)
+        self.gate.begin(source, self.result_thread, hwnd)
         if not ConfigManager.get_config_value('misc', 'hide_status_window'):
             self.result_thread.statusSignal.connect(self.status_window.updateStatus)
-            self.status_window.closeSignal.connect(self.stop_result_thread)
         self.result_thread.resultSignal.connect(self.on_transcription_complete)
+        # finished fires on every exit path (result, too short, no speech, error, stop),
+        # so the recorder is always released and the wake path re-armed.
+        self.result_thread.finished.connect(self.on_result_finished)
         self.result_thread.start()
+
+    def on_result_finished(self):
+        self.gate.finish(self.sender(), time.monotonic())
 
     def stop_result_thread(self):
         """
@@ -178,15 +294,33 @@ class WhisperWriterApp(QObject):
         """
         When the transcription is complete, type the result and start listening for the activation key again.
         """
-        self.input_simulator.typewrite(result)
+        source = getattr(self.sender(), 'source', 'key')
+        if source == 'wake':
+            self.type_wake_transcript(result)
+        else:
+            self.input_simulator.typewrite(result)
 
         if ConfigManager.get_config_value('misc', 'noise_on_completion'):
             AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)
 
-        if ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
+        # Only a key recording re-arms continuous mode; a wake recording is always one-shot.
+        if source == 'key' and ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
             self.start_result_thread()
         else:
             self.key_listener.start()
+
+    def type_wake_transcript(self, result):
+        """
+        Type a wake transcript only into the window that was in front when the wake
+        word was heard, re-checking before every keystroke. Whatever could not be
+        typed is shown in a tray message (it is also in history.log).
+        """
+        if not result.strip():
+            return
+        hwnd = self.gate.hwnd
+        remainder = self.input_simulator.typewrite(result, should_continue=lambda: foreground_window() == hwnd)
+        if remainder.strip():
+            self.notify('Wake dictation not typed', f'The window changed. Untyped: {remainder.strip()}', warning=True)
 
     def run(self):
         """
