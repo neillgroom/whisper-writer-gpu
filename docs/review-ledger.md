@@ -3,6 +3,10 @@
 Policy: `review-routing-2026-10-07-v1` (CodeRabbit is the only specialist seat; Bugbot out since 2026-10-09).
 One line per board: tag · headSha · real or seat-failure · open P0/P1 · SUMMARY.
 
+## vibekeys (plan: docs/plans/2026-11-20-vibekeys-fixes.md)
+
+- [vibekeys plan b1/3] c08386f run 2026-11-21T02-42-08-329Z-21400 · real review (chair2 Codex FAILED -> DeepSeek failover FILLED, chair3 Antigravity FILLED, chair4 Grok FILLED) · open P1: deploy-would-overwrite-live-config, c1-missed-config_schema+test_hallucination_guard, c2-collapse-ordering, re-arm-on-empty, drift-baseline-wrong · SUMMARY C:\Users\neill\AppData\Local\Temp\4way-runs\2026-11-21T02-42-08-329Z-21400\board-summary-2026-11-21T02-54-58-508Z.md · all 19 findings dispositioned FIXED via plan rev 2.
+
 ## wake-word (plan: docs/plans/2026-10-16-wake-word.md)
 
 - [wake-word plan b1/3] 3c367fc · seat-failure (Cursor failed → Antigravity failover) · 12 findings, all FIXED · `4way-runs\2026-10-16T16-51-32-773Z-49700`
