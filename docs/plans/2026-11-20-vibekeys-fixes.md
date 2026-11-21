@@ -1,7 +1,7 @@
 # Plan: vibekeys fixes — pad MIC, doubled dictation, Shift latch, drift port, AHK scoping
 
 Date: 2026-11-20 · Repo: whisper-writer-gpu-wake · Base: main (358e85f) · Policy: review-routing-2026-10-07-v1
-Rev 2 — folds in every plan-board-1 finding (run 2026-11-21T02-42-08-329Z-21400).
+Rev 3 — folds in every plan-board-1 and plan-board-2 finding (runs 2026-11-21T02-42-08 and 2026-11-21T02-58-10).
 
 ## Problem
 
@@ -42,8 +42,16 @@ unreviewed live-only code drift and an approved-but-unapplied AHK change.
 ### c1 `port-drift`
 Make the repo tree match the running install (and carry the newer repo code in the same branch):
 - Port verbatim from live: `src/input_simulation.py`, the `is_hallucination` block of `src/transcription.py`,
-  the `src/result_thread.py` one-liner, `src/config_schema.yaml`, `tests/test_hallucination_guard.py`,
+  `src/config_schema.yaml`, `tests/test_hallucination_guard.py`,
   `tools/pad-upload/{ch57x_upload.py,final.json,markers.json}`.
+- `src/result_thread.py`: port the live one-liner — and state the semantic change explicitly: repo guards
+  `extra_settings` on `is_wake`, live guards on `device is not None`, which applies
+  `WasapiSettings(auto_convert=True)` to key recordings on the configured device (the pad MIC path). Because
+  `audio_devices.extra_settings` returns `WasapiSettings` unconditionally, a NON-WASAPI `sound_device` index
+  would raise `PortAudioError` — so this chunk also changes `src/audio_devices.py` to return
+  `WasapiSettings` only when the device's host API is WASAPI (enumerate `sd.query_devices()[device]`'s host
+  API; unknown/mismatched → no extra settings), plus a unit test for a non-WASAPI index.
+- `tests/test_typewrite.py` is EXISTING repo code (3 lowercase-pynput tests) — it is not a port; c3 extends it.
 - `src/config.yaml`: port `vad_filter: true`, `condition_on_previous_text: false`, and the `wake_options`
   section **with `enabled: false`** as the repo default (fresh clones without .onnx models must not warn at
   boot). `sound_device` stays `null` in the repo template (machine-specific; live keeps 15).
@@ -60,32 +68,45 @@ Ordering is load-bearing (plan-board-1 P1):
 1. `post_process_transcription` runs `is_hallucination` on the ORIGINAL stripped text and returns `''` before
    any collapse — a 3× loop of a short phrase must still be dropped, never collapsed-and-typed
    (`'I am here. ' * 3` → `''`).
-2. Collapse applies only to survivors: when the whole transcript is an exact k× repeat (k≥2) of a unit of ≥3
-   words, keep the FIRST copy. Keys and slice offsets come from the SAME whitespace-delimited `\S+` tokens
+2. Collapse applies only to survivors: when the whole transcript is an exact k× repeat (k≥2) of a unit of ≥4
+   words, keep the FIRST copy (the reported doubled line is 8 words, unit 4; a 2× of a 3-word unit such as
+   "I don't know. I don't know." is ordinary speech and must be typed whole — it also escapes
+   `is_hallucination`, which is exactly why the floor is 4). Keys and slice offsets come from the SAME
+   whitespace-delimited `\S+` tokens
    (punctuation/case-folded for matching only); the kept text is the original string up to the end of copy 1's
    last token span, so copy 1's punctuation and capitalization are preserved verbatim (a contraction's apostrophe
    is inside its token span, so no mis-slicing).
-3. Run `is_hallucination` on the collapsed result too: a 2× `SILENCE_PHRASES` phrase or a doubled
-   `initial_prompt` sentence collapses to 1× and must then be dropped, not typed.
-4. Every collapse is logged (`ConfigManager.console_print`, and it is visible in the transcript log) so
-   truncation is auditable.
+3. Run `is_hallucination` on the collapsed result too: a ≥4-word `SILENCE_PHRASES` phrase or a doubled
+   `initial_prompt` sentence that collapses to 1× must then be dropped, not typed.
+4. Every collapse is AUDITABLE where it survives `pythonw.exe`: append one line to the same `history.log`
+   (`<timestamp>\tCOLLAPSED\t<original transcript>\t-> <kept copy>`); `console_print` alone is discarded under
+   `pythonw.exe`, so `history.log` is the audit trail.
 - `main.py` `on_transcription_complete`: gate ONLY the `typewrite` call and the `noise_on_completion` beep on
   `result.strip()`; the re-arm tail (`start_result_thread()` in continuous mode / `key_listener.start()`)
   ALWAYS runs — an early return there would leave the pad MIC dead after a silence artifact. History logging
   unchanged.
-- Verify: unit tests — 2× clean repeat collapses; 2× repeat with punctuation drift collapses and keeps copy 1's
-  punctuation; 3× short-unit loop still fully dropped (unit ≥3 words, asserted against
-  `post_process_transcription('I am here. I am here. I am here.') == ''`); 2× silence phrase dropped; 2×
-  initial-prompt sentence dropped; non-repeat untouched; whitespace-only result types nothing but re-arms the
-  listener (`source='key'` asserted). Full suite.
+- Verify: unit tests — 2× clean repeat of a ≥4-word unit collapses; 2× repeat with punctuation drift collapses
+  and keeps copy 1's punctuation; 2× of a 3-word unit ("I don't know. I don't know.") is typed WHOLE; 3×
+  short-unit loop still fully dropped (unit ≥3 words, asserted against
+  `post_process_transcription('I am here. I am here. I am here.') == ''`); 2× ≥4-word silence phrase dropped;
+  2× initial-prompt sentence dropped; non-repeat untouched; collapse writes the COLLAPSED line to history.log;
+  whitespace-only result types nothing but re-arms the listener (`source='key'` asserted). Full suite.
 
 ### c3 `shift-latch`
 - `input_simulation.py`: defensive release covers `Key.shift_l`, `Key.shift_r`, and `Key.shift` (all three;
   releasing an unpressed key is a no-op) at the start of `_typewrite_pynput`, AND before the Ctrl+V in
-  `_typewrite_paste` (a latched Shift would turn the paste into Ctrl+Shift+V). Wrap the `pyperclip.copy(text)`
-  calls inside the retry loop in try/except so a locked clipboard cannot raise.
-- Verify: unit tests asserting all three releases are attempted on both paths; full suite. The physical
-  verification (a latched right Shift no longer selection-extends) is part of the live deploy check.
+  `_typewrite_paste` (a latched Shift would turn the paste into Ctrl+Shift+V).
+- Clipboard hardening on the paste path: EVERY clipboard call gets a guard — the pre-loop `pyperclip.copy(text)`,
+  the in-loop `pyperclip.paste()` read-back, and the in-loop `pyperclip.copy(text)`. On any clipboard failure:
+  skip the Ctrl+V entirely and return the untyped remainder (typed as a fallback by the caller or surfaced in
+  the wake tray notice) — a swallowed copy failure followed by Ctrl+V would paste the user's STALE clipboard,
+  which is worse than typing nothing. `key_listener.start()`/re-arm stays OUTSIDE any try, so a locked
+  clipboard can never leave the pad dead.
+- Verify: extend `tests/test_typewrite.py` (existing repo file, currently 3 lowercase-pynput tests, no
+  `pressed()` on its FakeKeyboard): add uppercase Shift+VK tests and `_typewrite_paste` tests (success; copy
+  failure returns remainder without Ctrl+V; all three Shift releases attempted on both paths). Full suite.
+  The physical verification (a latched right Shift no longer selection-extends) is part of the live deploy
+  check.
 
 ### c4 `vibekeys-terminal-only` (outside the repo — flagged)
 - `C:\Users\neill\bin\vibekeys.ahk` (not version-controlled): gate Retry and YOLO handlers with
@@ -97,9 +118,10 @@ Ordering is load-bearing (plan-board-1 P1):
 ## Deploy (separate authorization, after chunk acceptance)
 
 1. Snapshot: copy live `src` to `C:\Tools\whisper-writer-wake\src.bak-<date>` (rollback path).
-2. Copy CODE files only: `input_simulation.py`, `transcription.py`, `result_thread.py`, `config_schema.yaml`,
-   `wake_setup.py`, `ui/settings_window.py`. **Never copy `config.yaml`** — live keeps `sound_device: 15` and
-   `wake_options.enabled: true`.
+2. Copy CODE files only: `input_simulation.py`, `transcription.py`, `result_thread.py`, `audio_devices.py`,
+   `main.py`, `config_schema.yaml`, `wake_setup.py`, `ui/settings_window.py`. **Never copy `config.yaml`** —
+   live keeps `sound_device: 15` and `wake_options.enabled: true`. (`main.py` is required: c2's
+   `on_transcription_complete` gate lives there; without it the install still types the lone space.)
 3. Restart the app (one clean chain). Rollback = restore the snapshot and restart.
 4. Neill re-tests: pad MIC hold = dictation; no lone spaces; no doubled lines; no delete-after-dictation;
    Retry/YOLO inert outside Windows Terminal.

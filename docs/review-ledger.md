@@ -6,6 +6,7 @@ One line per board: tag · headSha · real or seat-failure · open P0/P1 · SUMM
 ## vibekeys (plan: docs/plans/2026-11-20-vibekeys-fixes.md)
 
 - [vibekeys plan b1/3] c08386f run 2026-11-21T02-42-08-329Z-21400 · real review (chair2 Codex FAILED -> DeepSeek failover FILLED, chair3 Antigravity FILLED, chair4 Grok FILLED) · open P1: deploy-would-overwrite-live-config, c1-missed-config_schema+test_hallucination_guard, c2-collapse-ordering, re-arm-on-empty, drift-baseline-wrong · SUMMARY C:\Users\neill\AppData\Local\Temp\4way-runs\2026-11-21T02-42-08-329Z-21400\board-summary-2026-11-21T02-54-58-508Z.md · all 19 findings dispositioned FIXED via plan rev 2.
+- [vibekeys plan b2/3] f2ad0cc run 2026-11-21T02-58-10-347Z-45524 · real review (chair2 Codex FAILED -> DeepSeek failover FILLED, chair3 Antigravity FILLED, chair4 Grok FILLED) · open P1: deploy-list-omits-main.py, collapse-floor-must-be-4-words · P2: collapse-audit-to-history.log, clipboard-guard-all-calls+stale-paste, result_thread-semantic-change+WASAPI-hostAPI-guard, test_typewrite-paste-uppercase-tests · SUMMARY C:\Users\neill\AppData\Local\Temp\4way-runs\2026-11-21T02-58-10-347Z-45524\board-summary-2026-11-21T03-07-13-443Z.md · all 17 findings dispositioned FIXED via plan rev 3.
 
 ## wake-word (plan: docs/plans/2026-10-16-wake-word.md)
 
