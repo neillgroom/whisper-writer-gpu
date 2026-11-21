@@ -49,16 +49,23 @@ Make the repo tree match the running install (and carry the newer repo code in t
   `WasapiSettings(auto_convert=True)` to key recordings on the configured device (the pad MIC path). Because
   `audio_devices.extra_settings` returns `WasapiSettings` unconditionally, a NON-WASAPI `sound_device` index
   would raise `PortAudioError` — so this chunk also changes `src/audio_devices.py` to return
-  `WasapiSettings` only when the device's host API is WASAPI (enumerate `sd.query_devices()[device]`'s host
-  API; unknown/mismatched → no extra settings), plus a unit test for a non-WASAPI index.
+  `WasapiSettings` only when the device's host API is WASAPI — detected the same way `resolve_input` does it
+  (compare `query_hostapis()[hostapi]['name']` for `'WASAPI' in name`, NOT the integer hostapi index; a bare
+  `== "WASAPI"` compare would silently return None for live device 15 and drop `auto_convert`). The whole
+  lookup is wrapped in try/except with an explicit `0 <= device < len(query_devices())` bound (a stale index,
+  an empty list, or negative-index wraparound returns no extra settings, never raises). Tests: non-WASAPI
+  index → None; stale/out-of-range index → None; WASAPI index → WasapiSettings; the pre-existing
+  `test_audio_devices.py`/`test_wake_listener.py` expectations get host-API mocks instead of touching real
+  Windows MME indices.
 - `tests/test_typewrite.py` is EXISTING repo code (3 lowercase-pynput tests) — it is not a port; c3 extends it.
 - `src/config.yaml`: port `vad_filter: true`, `condition_on_previous_text: false`, and the `wake_options`
   section **with `enabled: false`** as the repo default (fresh clones without .onnx models must not warn at
   boot). `sound_device` stays `null` in the repo template (machine-specific; live keeps 15).
 - `src/ui/settings_window.py`: render null numerics as empty, not `'None'` —
-  `create_line_edit('' if current_value is None else str(current_value))` — required because
-  `sound_device` becomes `type: int` with a `null` default; the current `str(current_value)` renders `'None'`
-  and crashes Save on a fresh clone.
+  `create_line_edit('' if current_value is None else str(current_value))` — AND the Save path maps an empty
+  string back to `None` for `type: int`/`float` settings (`int('')` raises `ValueError`; without this, Save
+  still crashes on a fresh clone with a different traceback). Required because `sound_device` becomes
+  `type: int` with a `null` default.
 - Verify: repo test suite (pytest — 82 existing + 6 ported = 88 green expected) + `py_compile` on changed
   files. The ported `test_hallucination_guard.py` covers `is_hallucination`; the ported `test_typewrite.py`
   covers the pynput/paste paths c2/c3 build on.
@@ -69,18 +76,28 @@ Ordering is load-bearing (plan-board-1 P1):
    any collapse — a 3× loop of a short phrase must still be dropped, never collapsed-and-typed
    (`'I am here. ' * 3` → `''`).
 2. Collapse applies only to survivors: when the whole transcript is an exact k× repeat (k≥2) of a unit of ≥4
-   words, keep the FIRST copy (the reported doubled line is 8 words, unit 4; a 2× of a 3-word unit such as
+   words measured on the FOLDED keys — the same `_phrase_key` normalization (`[^\w\s]` stripped, casefolded)
+   used for matching, NOT raw `\S+` spans, so a spaced `-` or standalone `...` never inflates the unit length
+   ("Wait - one second. Wait - one second." is 6 folded words, unit 3, and must be typed whole). The reported
+   doubled line is 8 folded words, unit 4, and collapses. A 2× of a 3-word unit such as
    "I don't know. I don't know." is ordinary speech and must be typed whole — it also escapes
-   `is_hallucination`, which is exactly why the floor is 4). Keys and slice offsets come from the SAME
-   whitespace-delimited `\S+` tokens
-   (punctuation/case-folded for matching only); the kept text is the original string up to the end of copy 1's
-   last token span, so copy 1's punctuation and capitalization are preserved verbatim (a contraction's apostrophe
-   is inside its token span, so no mis-slicing).
-3. Run `is_hallucination` on the collapsed result too: a ≥4-word `SILENCE_PHRASES` phrase or a doubled
+   `is_hallucination`, which is exactly why the floor is 4 folded words. Slice offsets still come from the
+   whitespace-delimited `\S+` tokens of the RAW text; the kept text is the original string up to the end of
+   copy 1's last token span, so copy 1's punctuation and capitalization are preserved verbatim (a contraction's
+   apostrophe is inside its token span, so no mis-slicing).
+3. Small-phrase repeats that escape both the 3× loop (len//3) and the 4-word floor are caught directly in
+   `is_hallucination`: reject k≥2 repeats of a `SILENCE_PHRASES` phrase or an `initial_prompt` sentence at ANY
+   word count ("Thank you. Thank you." is dropped).
+4. Run `is_hallucination` on the collapsed result too: a ≥4-word `SILENCE_PHRASES` phrase or a doubled
    `initial_prompt` sentence that collapses to 1× must then be dropped, not typed.
-4. Every collapse is AUDITABLE where it survives `pythonw.exe`: append one line to the same `history.log`
-   (`<timestamp>\tCOLLAPSED\t<original transcript>\t-> <kept copy>`); `console_print` alone is discarded under
-   `pythonw.exe`, so `history.log` is the audit trail.
+5. Every collapse is AUDITABLE where it survives `pythonw.exe`: append one JSON-encoded line to the same
+   `history.log` (`{"ts": ..., "event": "COLLAPSED", "original": ..., "kept": ...}`) — JSON so a transcript
+   containing tabs or newlines cannot corrupt the tab-delimited consumer format; `console_print` alone is
+   discarded under `pythonw.exe`. The write is wrapped in try/except with the path injected/patchable, so a
+   locked or unreadable history file can never abort `ResultThread.run()`, and pytest never pollutes the live
+   `history.log`.
+6. Blank transcripts never reach history: return `''` when `not transcription` BEFORE `add_trailing_space`
+   appends the lone space, so empty/silence transcripts no longer log or type `' '`.
 - `main.py` `on_transcription_complete`: gate ONLY the `typewrite` call and the `noise_on_completion` beep on
   `result.strip()`; the re-arm tail (`start_result_thread()` in continuous mode / `key_listener.start()`)
   ALWAYS runs — an early return there would leave the pad MIC dead after a silence artifact. History logging
@@ -98,10 +115,17 @@ Ordering is load-bearing (plan-board-1 P1):
   `_typewrite_paste` (a latched Shift would turn the paste into Ctrl+Shift+V).
 - Clipboard hardening on the paste path: EVERY clipboard call gets a guard — the pre-loop `pyperclip.copy(text)`,
   the in-loop `pyperclip.paste()` read-back, and the in-loop `pyperclip.copy(text)`. On any clipboard failure:
-  skip the Ctrl+V entirely and return the untyped remainder (typed as a fallback by the caller or surfaced in
-  the wake tray notice) — a swallowed copy failure followed by Ctrl+V would paste the user's STALE clipboard,
-  which is worse than typing nothing. `key_listener.start()`/re-arm stays OUTSIDE any try, so a locked
-  clipboard can never leave the pad dead.
+  skip the Ctrl+V entirely and return the untyped remainder — a swallowed copy failure followed by Ctrl+V would
+  paste the user's STALE clipboard, which is worse than typing nothing. The ONE fallback is named per caller:
+  on the key path, `main.py on_transcription_complete` falls back to `_typewrite_pynput` typing for a
+  clipboard-failure remainder (and shows a tray notice if even per-key typing returns a remainder); on the wake
+  path the existing tray notice stays, with its message naming the real cause (clipboard, not just focus
+  change). `key_listener.start()`/re-arm stays OUTSIDE any try, so a locked clipboard can never leave the pad
+  dead.
+- `_typewrite_paste` cleanup while touching it: remove the pre-paste `pyperclip.copy(backup)` clobber (it
+  wastes clipboard calls on success and can overwrite newer user clipboard data with stale backup if
+  `copy(text)` fails — the backup is restored at the START of the next paste instead), and re-check
+  `should_continue()` immediately before the Ctrl+V after the retry sleeps.
 - Verify: extend `tests/test_typewrite.py` (existing repo file, currently 3 lowercase-pynput tests, no
   `pressed()` on its FakeKeyboard): add uppercase Shift+VK tests and `_typewrite_paste` tests (success; copy
   failure returns remainder without Ctrl+V; all three Shift releases attempted on both paths). Full suite.
@@ -117,7 +141,9 @@ Ordering is load-bearing (plan-board-1 P1):
 
 ## Deploy (separate authorization, after chunk acceptance)
 
-1. Snapshot: copy live `src` to `C:\Tools\whisper-writer-wake\src.bak-<date>` (rollback path).
+1. Snapshot: copy live `C:\Tools\whisper-writer-wake\src` in its ENTIRETY (including `src\main.py` — every
+   file the deploy overwrites lives under `src\`; verified live: no root-level `main.py`) to a timestamped
+   backup (`...\whisper-writer-wake\bak-<date>-src\`). Rollback = restore the backup and restart.
 2. Copy CODE files only: `input_simulation.py`, `transcription.py`, `result_thread.py`, `audio_devices.py`,
    `main.py`, `config_schema.yaml`, `wake_setup.py`, `ui/settings_window.py`. **Never copy `config.yaml`** —
    live keeps `sound_device: 15` and `wake_options.enabled: true`. (`main.py` is required: c2's
