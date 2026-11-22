@@ -96,43 +96,48 @@ class ComTests(unittest.TestCase):
     def fake_ole(self, hr):
         ole = mock.Mock()
         ole.CoInitializeEx.return_value = hr
-        fake_ctypes = mock.Mock()
-        fake_ctypes.windll.ole32 = ole
-        patcher = mock.patch.object(audio_devices, 'ctypes', fake_ctypes)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for name, fake in (('_co_initialize_ex', ole.CoInitializeEx), ('_co_uninitialize', ole.CoUninitialize)):
+            patcher = mock.patch.object(audio_devices, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         return ole
 
     def test_windows_inits_multithreaded_and_releases_when_held(self):
         ole = self.fake_ole(0)
-        with mock.patch.object(audio_devices.sys, 'platform', 'win32'):
-            held = audio_devices.com_initialize()
-            audio_devices.com_uninitialize(held)
+        held = audio_devices.com_initialize()
+        audio_devices.com_uninitialize(held)
         ole.CoInitializeEx.assert_called_once_with(None, 0)
         self.assertTrue(held)
         ole.CoUninitialize.assert_called_once_with()
 
     def test_already_initialized_still_needs_release(self):
         self.fake_ole(1)
-        with mock.patch.object(audio_devices.sys, 'platform', 'win32'):
-            self.assertTrue(audio_devices.com_initialize())
+        self.assertTrue(audio_devices.com_initialize())
 
     def test_changed_mode_is_not_released(self):
         ole = self.fake_ole(-2147417850)  # RPC_E_CHANGED_MODE
-        with mock.patch.object(audio_devices.sys, 'platform', 'win32'):
-            held = audio_devices.com_initialize()
-            audio_devices.com_uninitialize(held)
+        held = audio_devices.com_initialize()
+        audio_devices.com_uninitialize(held)
         self.assertFalse(held)
         ole.CoUninitialize.assert_not_called()
 
     def test_non_windows_calls_neither(self):
-        ole = self.fake_ole(0)
-        with mock.patch.object(audio_devices.sys, 'platform', 'linux'):
+        # Off Windows nothing is bound at import.
+        with mock.patch.object(audio_devices, '_co_initialize_ex', None), \
+             mock.patch.object(audio_devices, '_co_uninitialize', None):
             held = audio_devices.com_initialize()
             audio_devices.com_uninitialize(held)
+            audio_devices.com_uninitialize(True)  # even a stray True cannot call anything
         self.assertFalse(held)
-        ole.CoInitializeEx.assert_not_called()
-        ole.CoUninitialize.assert_not_called()
+
+    def test_the_binding_is_private_with_types(self):
+        if audio_devices.sys.platform != 'win32':
+            self.skipTest('Windows binding')
+        import ctypes
+        self.assertIsNot(audio_devices._co_initialize_ex, ctypes.windll.ole32.CoInitializeEx)
+        self.assertEqual(audio_devices._co_initialize_ex.restype, ctypes.c_long)
+        # Real round trip on this test thread: init, then release only if held.
+        audio_devices.com_uninitialize(audio_devices.com_initialize())
 
 
 if __name__ == '__main__':

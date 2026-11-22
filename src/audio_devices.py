@@ -15,6 +15,18 @@ import sys
 
 import sounddevice as sd
 
+# Bound once at import on a private WinDLL, so argtypes/restype never touch the shared
+# windll.ole32 object other code (WakeListener) uses.
+_co_initialize_ex = _co_uninitialize = None
+if sys.platform == 'win32':
+    _ole32 = ctypes.WinDLL('ole32')
+    _co_initialize_ex = _ole32.CoInitializeEx
+    _co_initialize_ex.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    _co_initialize_ex.restype = ctypes.c_long  # HRESULT
+    _co_uninitialize = _ole32.CoUninitialize
+    _co_uninitialize.argtypes = []
+    _co_uninitialize.restype = None
+
 from utils import ConfigManager
 
 
@@ -86,10 +98,10 @@ def com_initialize():
     PortAudio -9999. Returns True when the caller holds a reference that
     com_uninitialize() must release. Non-Windows: False, nothing called.
     """
-    if sys.platform != 'win32':
+    if _co_initialize_ex is None:
         return False
     COINIT_MULTITHREADED = 0x0
-    hr = ctypes.windll.ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
+    hr = _co_initialize_ex(None, COINIT_MULTITHREADED)
     # S_OK (0) and S_FALSE (1, already initialized here) both need a CoUninitialize;
     # RPC_E_CHANGED_MODE (negative) means another apartment owns this thread -- do not.
     return hr in (0, 1)
@@ -97,5 +109,5 @@ def com_initialize():
 
 def com_uninitialize(held):
     """Release the reference com_initialize() returned True for."""
-    if held:
-        ctypes.windll.ole32.CoUninitialize()
+    if held and _co_uninitialize is not None:
+        _co_uninitialize()

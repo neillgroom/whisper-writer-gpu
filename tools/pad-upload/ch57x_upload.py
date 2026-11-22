@@ -101,24 +101,27 @@ def main():
 
     print(f"opened: {d['path'][:80]}")
 
-    # Init: 64 zero bytes (main.rs open_device). Optional; skipped if unsupported.
     try:
-        n = dev.write([0x00] * 64)
-        print(f"init write: {n}")
-    except Exception as e:
-        print(f"init write failed (continuing): {e}")
+        # Init: 64 zero bytes (main.rs open_device). Optional; skipped if unsupported.
+        try:
+            n = dev.write([0x00] * 64)
+            print(f"init write: {n}")
+        except Exception as e:
+            print(f"init write failed (continuing): {e}")
 
-    sent = 0
-    for msg in msgs:
-        buf = list(msg) + [0x00] * (64 - len(msg))
-        n = dev.write(buf)
-        sent += 1
-        print(f"msg {sent:02d}: {' '.join(f'{b:02X}' for b in msg)}  (wrote {n})")
-        if n <= 0:
-            print(f"!! write failed: {n}")
-            sys.exit(2)
+        sent = 0
+        for msg in msgs:
+            buf = list(msg) + [0x00] * (64 - len(msg))
+            n = dev.write(buf)
+            sent += 1
+            print(f"msg {sent:02d}: {' '.join(f'{b:02X}' for b in msg)}  (wrote {n})")
+            if n <= 0:
+                print(f"!! write failed: {n}")
+                sys.exit(2)
 
-    print(f"done: {sent} messages sent")
+        print(f"done: {sent} messages sent")
+    finally:
+        dev.close()
 
 
 if __name__ == "__main__":

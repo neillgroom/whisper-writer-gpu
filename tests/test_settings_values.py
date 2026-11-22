@@ -30,8 +30,12 @@ class StageValuesTests(unittest.TestCase):
                    ('threshold', lambda: later.append(1) or 0.4)]
         values, bad = stage_values(readers)
         self.assertIsNone(values)
-        self.assertEqual(bad, 'silence_duration')
+        self.assertEqual(bad, ('silence_duration', 'must be a whole number'))
         self.assertEqual(later, [])  # stops at the first bad field
+
+    def test_a_blank_required_number_is_rejected_with_its_name(self):
+        readers = [('silence_duration', lambda: parse_typed_text('', 'int', nullable=False))]
+        self.assertEqual(stage_values(readers), (None, ('silence_duration', 'cannot be empty')))
 
 
 class DisplayTextTests(unittest.TestCase):
@@ -45,10 +49,29 @@ class DisplayTextTests(unittest.TestCase):
 
 
 class ParseTypedTextTests(unittest.TestCase):
-    def test_empty_numeric_saves_as_none(self):
+    def test_empty_nullable_numeric_saves_as_none(self):
         for value_type in ('int', 'float'):
-            self.assertIsNone(parse_typed_text('', value_type))
-            self.assertIsNone(parse_typed_text('  ', value_type))
+            self.assertIsNone(parse_typed_text('', value_type, nullable=True))
+            self.assertIsNone(parse_typed_text('  ', value_type, nullable=True))
+
+    def test_empty_non_nullable_numeric_is_rejected(self):
+        for value_type in ('int', 'float'):
+            for text in ('', '  '):
+                with self.assertRaises(ValueError):
+                    parse_typed_text(text, value_type, nullable=False)
+
+    def test_nan_and_infinity_are_rejected(self):
+        for text in ('nan', 'NaN', 'inf', '-inf', 'Infinity', '1e999'):
+            with self.assertRaises(ValueError, msg=text):
+                parse_typed_text(text, 'float')
+
+    def test_non_numeric_is_rejected(self):
+        with self.assertRaises(ValueError):
+            parse_typed_text('abc', 'int')
+        with self.assertRaises(ValueError):
+            parse_typed_text('1.5', 'int')
+        with self.assertRaises(ValueError):
+            parse_typed_text('abc', 'float')
 
     def test_numbers_parse_to_their_type(self):
         self.assertEqual(parse_typed_text('15', 'int'), 15)
@@ -106,6 +129,48 @@ class SaveSettingsWindowTests(unittest.TestCase):
             combo = window.findChild(self.QComboBox, 'model_options_local_model_input')
             self.assertEqual(combo.currentText(), model)
             self.assertEqual(window.get_widget_value_typed(combo, 'str'), model)
+
+    def save_patched(self):
+        m = self.mock
+        return (m.patch.object(self.sw.QMessageBox, 'warning'),
+                m.patch.object(self.sw.QMessageBox, 'information'),
+                m.patch.object(self.ConfigManager, 'set_config_value'),
+                m.patch.object(self.ConfigManager, 'save_config'),
+                m.patch.object(self.sw, 'set_key'))
+
+    def test_a_blank_non_nullable_number_warns_and_writes_nothing(self):
+        self.field(self.QLineEdit, 'recording_options_sample_rate_input').setText('')
+        p = self.save_patched()
+        with p[0] as warning, p[1], p[2] as set_value, p[3] as save, p[4]:
+            self.window.save_settings()
+        self.assertIn("'Sample rate' cannot be empty", warning.call_args[0][2])
+        set_value.assert_not_called()
+        save.assert_not_called()
+
+    def test_a_blank_nullable_number_saves_as_none(self):
+        self.field(self.QLineEdit, 'recording_options_sound_device_input').setText('')
+        p = self.save_patched()
+        with p[0] as warning, p[1], p[2] as set_value, p[3] as save, p[4], \
+             self.mock.patch.object(self.window, 'close'):
+            self.window.save_settings()
+        warning.assert_not_called()
+        set_value.assert_any_call(None, 'recording_options', 'sound_device')
+        save.assert_called_once()
+
+    def test_reset_keeps_an_unknown_model_and_tolerates_none(self):
+        combo = self.field(self.QComboBox, 'model_options_local_model_input')
+        keys = ('model_options', 'local', 'model')
+        before = self.ConfigManager.get_config_value(*keys)
+        self.addCleanup(self.ConfigManager.set_config_value, before, *keys)
+        self.ConfigManager.set_config_value('my-finetune', *keys)
+        with self.mock.patch.object(self.ConfigManager, 'reload_config'):
+            self.window.reset_settings()
+        self.assertEqual(combo.currentText(), 'my-finetune')
+        self.window.set_widget_value(combo, None, 'str')  # setCurrentText(None) would raise TypeError
+        self.assertEqual(combo.currentText(), 'my-finetune')
+        self.window.set_widget_value(combo, 'my-finetune', 'str')
+        items = [combo.itemText(i) for i in range(combo.count())]
+        self.assertEqual(items.count('my-finetune'), 1)  # not appended twice
 
 
 if __name__ == '__main__':

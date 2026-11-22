@@ -52,11 +52,20 @@ class TypewriteTests(unittest.TestCase):
     def setUp(self):
         set_config('pynput', 'post_processing', 'input_method')
         set_config(0.0, 'post_processing', 'writing_key_press_delay')
-        patcher = mock.patch.object(input_simulation, 'layout_key', lambda ch: LAYOUT.get(ch))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.caps = False
+        self.hkls = []
+        for patcher in (
+                mock.patch.object(input_simulation, 'layout_key', self.fake_layout_key),
+                mock.patch.object(input_simulation, 'caps_lock_on', lambda: self.caps),
+                mock.patch.object(input_simulation, 'target_layout', lambda: 0x4090409)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.sim = InputSimulator()
         self.kb = self.sim.keyboard = FakeKeyboard()
+
+    def fake_layout_key(self, char, hkl=None):
+        self.hkls.append(hkl)
+        return LAYOUT.get(char)
 
     def assert_every_shift_press_released(self):
         for shift in SHIFTS:
@@ -133,18 +142,109 @@ class TypewriteTests(unittest.TestCase):
         self.assertEqual(self.kb.events[-1], ('up', Key.shift))
         self.assert_every_shift_press_released()
 
-    def test_a_raising_press_still_releases_shift(self):
-        def boom(key):
-            if key not in SHIFTS:
-                raise RuntimeError('injection failed')
-            self.kb.events.append(('down', key))
-        self.kb.press = boom
-        with self.assertRaises(RuntimeError):
+    def shifted(self, vk):
+        key = KeyCode.from_vk(vk)
+        return [('down', Key.shift), ('down', key), ('up', key), ('up', Key.shift)]
+
+    def bare(self, vk):
+        key = KeyCode.from_vk(vk)
+        return [('down', key), ('up', key)]
+
+    def test_caps_lock_on_uppercase_is_the_vk_without_shift(self):
+        self.caps = True
+        self.sim.typewrite('H')
+        self.assertEqual(self.kb.events[3:], self.bare(0x48))
+
+    def test_caps_lock_on_lowercase_is_the_vk_with_shift(self):
+        self.caps = True
+        self.sim.typewrite('h')
+        self.assertEqual(self.kb.events[3:], self.shifted(0x48))
+
+    def test_caps_lock_on_punctuation_and_space_are_unchanged(self):
+        self.caps = True
+        self.sim.typewrite('? ')
+        self.assertEqual(self.kb.events[3:], self.shifted(0xBF) + [('down', ' '), ('up', ' ')])
+
+    def test_caps_lock_and_layout_are_read_once_per_call(self):
+        reads = []
+        with mock.patch.object(input_simulation, 'caps_lock_on', lambda: reads.append('caps') or False), \
+             mock.patch.object(input_simulation, 'target_layout', lambda: reads.append('hkl') or None):
+            self.sim.typewrite('Hello')
+        self.assertEqual(sorted(reads), ['caps', 'hkl'])
+
+    def test_the_target_layout_is_passed_to_every_lookup(self):
+        self.sim.typewrite('Ha')
+        self.assertEqual(self.hkls, [0x4090409, 0x4090409])
+
+    def test_no_target_layout_falls_back_to_the_default_lookup(self):
+        with mock.patch.object(input_simulation, 'target_layout', lambda: None):
             self.sim.typewrite('H')
+        self.assertEqual(self.hkls, [None])
+        self.assertEqual(self.kb.events[3:], self.shifted(0x48))
+
+    def test_a_character_the_controller_refuses_is_skipped_and_the_rest_typed(self):
+        real_press = self.kb.press
+
+        def press(key):
+            if key == '\U0001F600':
+                raise TypeError('wrong type')
+            real_press(key)
+        self.kb.press = press
+        with mock.patch.object(input_simulation.ConfigManager, 'console_print') as said:
+            self.assertEqual(self.sim.typewrite('a\U0001F600\U0001F600H'), '')
+        self.assertEqual(self.kb.typed, ['a', KeyCode.from_vk(0x48)])
+        said.assert_called_once()
+        self.assert_every_shift_press_released()
+
+    def test_a_shifted_press_that_raises_is_skipped_with_shift_released(self):
+        real_press = self.kb.press
+
+        def press(key):
+            if key == KeyCode.from_vk(0x48):
+                raise OSError('SendInput failed')
+            real_press(key)
+        self.kb.press = press
+        with mock.patch.object(input_simulation.ConfigManager, 'console_print'):
+            self.assertEqual(self.sim.typewrite('Ha'), '')
+        self.assertEqual(self.kb.typed, ['a'])
         self.assert_every_shift_press_released()
 
 
 class LayoutKeyTests(unittest.TestCase):
+    def test_a_layout_handle_uses_the_ex_lookup(self):
+        calls = []
+        with mock.patch.object(input_simulation, '_vk_key_scan', lambda c: calls.append('plain') or 0x0141), \
+             mock.patch.object(input_simulation, '_vk_key_scan_ex',
+                               lambda c, h: calls.append(('ex', h)) or 0x0141):
+            self.assertEqual(input_simulation.layout_key('A', 0x4070407), (0x41, 1))
+            self.assertEqual(input_simulation.layout_key('A', None), (0x41, 1))
+        self.assertEqual(calls, [('ex', 0x4070407), 'plain'])
+
+    def test_target_layout_failures_return_none(self):
+        with mock.patch.object(input_simulation, '_get_foreground_window', lambda: None):
+            self.assertIsNone(input_simulation.target_layout())
+        with mock.patch.object(input_simulation, '_get_foreground_window', lambda: 1), \
+             mock.patch.object(input_simulation, '_get_window_thread_process_id', lambda h, p: 0):
+            self.assertIsNone(input_simulation.target_layout())
+        with mock.patch.object(input_simulation, '_get_foreground_window', lambda: 1), \
+             mock.patch.object(input_simulation, '_get_window_thread_process_id', lambda h, p: 7), \
+             mock.patch.object(input_simulation, '_get_keyboard_layout', lambda t: 0):
+            self.assertIsNone(input_simulation.target_layout())
+        with mock.patch.object(input_simulation, '_get_foreground_window', side_effect=OSError):
+            self.assertIsNone(input_simulation.target_layout())
+        with mock.patch.object(input_simulation, '_get_foreground_window', lambda: 1), \
+             mock.patch.object(input_simulation, '_get_window_thread_process_id', lambda h, p: 7), \
+             mock.patch.object(input_simulation, '_get_keyboard_layout', lambda t: 0x4090409):
+            self.assertEqual(input_simulation.target_layout(), 0x4090409)
+
+    def test_caps_lock_reads_the_toggle_bit(self):
+        with mock.patch.object(input_simulation, '_get_key_state', lambda vk: 1 if vk == 0x14 else 0):
+            self.assertTrue(input_simulation.caps_lock_on())
+        with mock.patch.object(input_simulation, '_get_key_state', lambda vk: -128):  # held, not toggled
+            self.assertFalse(input_simulation.caps_lock_on())
+        with mock.patch.object(input_simulation, '_get_key_state', None):
+            self.assertFalse(input_simulation.caps_lock_on())
+
     def test_no_binding_or_non_bmp_returns_none(self):
         with mock.patch.object(input_simulation, '_vk_key_scan', None):
             self.assertIsNone(input_simulation.layout_key('A'))
