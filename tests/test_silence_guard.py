@@ -110,6 +110,50 @@ class CollapseTests(unittest.TestCase):
             raise RuntimeError('disk full')
         self.assertEqual(post_process_transcription(DOUBLED, boom), 'Testing, one, two, three. ')
 
+    def test_a_filler_masked_doubled_line_collapses(self):
+        raw = 'Testing one two three. Um, testing one two three.'
+        self.assertEqual(self.pp(raw), 'Testing one two three. ')
+        self.assertEqual(self.reports, [(raw, 'Testing one two three.')])
+
+    def test_a_filler_masked_silence_phrase_is_dropped(self):
+        for text in ['Thank you, uh.', 'Um, thank you.', 'Thank you. Uh, bye.']:
+            self.assertFalse(is_hallucination(text, PROMPT), text)  # the raw text alone passes
+            self.assertEqual(self.pp(text), '', text)
+        self.assertEqual(self.reports, [])
+
+    def test_a_filler_masked_short_loop_is_dropped(self):
+        text = 'I am here. Um, I am here. I am here.'
+        self.assertFalse(is_hallucination(text, PROMPT))
+        self.assertEqual(self.pp(text), '')
+        self.assertEqual(self.reports, [])
+
+    def test_a_collapse_emptied_by_later_cleanup_fires_no_callback(self):
+        cfg(self, True, 'post_processing', 'remove_trailing_period')
+        with mock.patch('transcription.collapse_repeat', return_value='.'):
+            self.assertEqual(self.pp(DOUBLED), '')
+        self.assertEqual(self.reports, [])
+
+    def test_kept_is_exactly_the_typed_text_without_the_trailing_space(self):
+        cfg(self, True, 'post_processing', 'remove_trailing_period')
+        cfg(self, True, 'post_processing', 'remove_capitalization')
+        typed = self.pp(DOUBLED)
+        self.assertEqual(typed, 'testing, one, two, three ')
+        self.assertEqual(self.reports, [(DOUBLED, typed[:-1])])
+
+    def test_any_mix_of_silence_phrases_and_prompt_sentences_is_dropped(self):
+        for text in ['Hello, welcome to my lecture. How are you today?',
+                     'How are you today? Hello, welcome to my lecture. How are you today?',
+                     'Thank you. Bye.', 'Thanks for watching! Thank you. Bye. Thanks.',
+                     'Thank you. How are you today?']:
+            self.assertTrue(is_hallucination(text, PROMPT), text)
+            self.assertEqual(self.pp(text), '', text)
+
+    def test_a_phrase_among_real_words_is_typed(self):
+        for text in ['thank you for the update', 'How are you today? I need the report.',
+                     'Bye for now, see you Monday.']:
+            self.assertFalse(is_hallucination(text, PROMPT), text)
+            self.assertEqual(self.pp(text), text + ' ', text)
+
     def test_no_callback_is_fine(self):
         self.assertEqual(post_process_transcription(DOUBLED), 'Testing, one, two, three. ')
 
@@ -184,8 +228,9 @@ class RunTests(unittest.TestCase):
     def test_an_eleventh_save_keeps_the_ten_newest(self):
         os.makedirs(self.folder())
         old = [f'doubled-20000101-0000{i:02d}-000.wav' for i in range(10)]
-        for name in old + ['notes.txt']:
+        for i, name in enumerate(old + ['notes.txt']):
             open(os.path.join(self.folder(), name), 'wb').close()
+            os.utime(os.path.join(self.folder(), name), (1_000_000 + i, 1_000_000 + i))
         self.run_thread(DOUBLED)
         files = sorted(os.listdir(self.folder()))
         self.assertIn('notes.txt', files)  # only our own files are pruned
@@ -234,6 +279,40 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.collapsed_lines(), [])
         self.assertEqual(len(self.history()), 1)
 
+    def test_a_clock_step_back_never_prunes_the_new_file(self):
+        os.makedirs(self.folder())
+        future = [f'doubled-29990101-0000{i:02d}-000-00.wav' for i in range(10)]
+        for i, name in enumerate(future):
+            path = os.path.join(self.folder(), name)
+            open(path, 'wb').close()
+            os.utime(path, (32_000_000_000 + i, 32_000_000_000 + i))  # far-future mtimes and names
+        new = result_thread.save_doubled_audio(self.audio, self.rate, self.folder())
+        files = sorted(os.listdir(self.folder()))
+        self.assertIn(new, files)
+        self.assertEqual(len(files), 10)
+        self.assertNotIn(future[0], files)  # the oldest of the others goes
+
+    def test_twelve_saves_in_one_millisecond_keep_ten_including_the_newest(self):
+        fixed = mock.Mock()
+        fixed.now.return_value = __import__('datetime').datetime(2026, 11, 22, 10, 0, 0, 123000)
+        names = []
+        with mock.patch('datetime.datetime', fixed):
+            for _ in range(12):
+                names.append(result_thread.save_doubled_audio(self.audio, self.rate, self.folder()))
+        self.assertEqual(names, sorted(names))  # zero-padded counters sort in save order
+        self.assertEqual(names[-1], 'doubled-20261122-100000-123-11.wav')
+        files = sorted(os.listdir(self.folder()))
+        self.assertEqual(len(files), 10)
+        self.assertIn(names[-1], files)
+
+    def test_keep_below_one_is_treated_as_one(self):
+        os.makedirs(self.folder())
+        for i in range(3):
+            open(os.path.join(self.folder(), f'doubled-20000101-000000-000-0{i}.wav'), 'wb').close()
+        for keep in (0, -5):
+            new = result_thread.save_doubled_audio(self.audio, self.rate, self.folder(), keep=keep)
+            self.assertEqual(os.listdir(self.folder()), [new])
+
     def test_a_blank_result_is_never_logged(self):
         self.assertEqual(self.run_thread('   '), [''])
         self.assertFalse(os.path.exists(os.path.join(self.tmp, 'history.log')))
@@ -247,7 +326,7 @@ class CompletionGateTests(unittest.TestCase):
     """on_transcription_complete: a blank result types and beeps nothing but always re-arms."""
 
     def make_app(self, source='key'):
-        app = SimpleNamespace(typed=[], started=[], key_listener=mock.Mock())
+        app = SimpleNamespace(typed=[], started=[], key_listener=mock.Mock(), result_thread=None)
         app.sender = lambda: SimpleNamespace(source=source)
         app.input_simulator = SimpleNamespace(typewrite=lambda text, **kw: app.typed.append(text) or '')
         app.start_result_thread = lambda *a, **kw: app.started.append('key')
@@ -273,11 +352,56 @@ class CompletionGateTests(unittest.TestCase):
         self.assertEqual(app.key_listener.start.call_count, 3)
 
     def test_blank_key_result_in_continuous_mode_restarts_recording(self):
+        """Real start_result_thread: the finishing thread still reports running until waited on."""
         cfg(self, 'continuous', 'recording_options', 'recording_mode')
+        cfg(self, True, 'misc', 'hide_status_window')
+
+        class FinishingThread:
+            source = 'key'
+
+            def __init__(self):
+                self.running = True
+                self.waits = []
+
+            def isRunning(self):
+                return self.running
+
+            def wait(self, ms):
+                self.waits.append(ms)
+                self.running = False
+                return True
+
+        created = []
+
+        def fake_result_thread(model, source='key', device=None):
+            t = mock.Mock(source=source)
+            created.append(t)
+            return t
+
         app = self.make_app('key')
-        self.complete(app, ' ')
+        finishing = FinishingThread()
+        app.sender = lambda: finishing
+        app.result_thread = finishing
+        app.local_model = None
+        app.gate = mock.Mock()
+        app.on_transcription_complete = lambda r: None
+        app.on_result_finished = lambda: None
+        app.start_result_thread = lambda *a, **kw: main.WhisperWriterApp.start_result_thread(app, *a, **kw)
+        with mock.patch.object(main, 'ResultThread', fake_result_thread):
+            self.complete(app, ' ')
         self.assertEqual(app.typed, [])
-        self.assertEqual(app.started, ['key'])
+        self.assertEqual(finishing.waits, [2000])
+        self.assertEqual(len(created), 1)
+        self.assertIs(app.result_thread, created[0])
+        created[0].start.assert_called_once()
+
+    def test_without_the_wait_the_restart_would_be_skipped(self):
+        # Guards the test above: the real start_result_thread does refuse while the old thread runs.
+        app = self.make_app('key')
+        app.result_thread = mock.Mock(isRunning=mock.Mock(return_value=True))
+        with mock.patch.object(main, 'ResultThread') as rt:
+            main.WhisperWriterApp.start_result_thread(app)
+        rt.assert_not_called()
 
     def test_blank_wake_result_still_rearms(self):
         cfg(self, 'continuous', 'recording_options', 'recording_mode')

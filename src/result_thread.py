@@ -34,16 +34,26 @@ def doubled_audio_dir():
 def save_doubled_audio(audio_data, sample_rate, folder, keep=DOUBLED_AUDIO_KEEP):
     """
     Save a recording whose transcript came back doubled as a 16-bit mono WAV in
-    `folder`, named from the local time to the millisecond (a counter suffix if
-    that name is taken), then delete all but the newest `keep` of these files.
-    Returns the file name. Raises on failure; the caller decides what that means.
+    `folder`, named from the local time to the millisecond plus a two-digit
+    counter (doubled-YYYYmmdd-HHMMSS-mmm-NN.wav), then delete all but `keep` of
+    these files: the one just written plus the keep-1 newest others by
+    modification time (name breaks ties). The new file is never pruned, even
+    after the clock steps back. keep < 1 is treated as 1: the save exists to be
+    examined, so it is always kept. Returns the file name. Raises on failure;
+    the caller decides what that means.
     """
     from datetime import datetime
+    keep = max(1, int(keep))
     os.makedirs(folder, exist_ok=True)
     stem = 'doubled-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f')[:-3]
     frames = np.asarray(audio_data, dtype=np.int16).tobytes()
-    for n in range(100):
-        name = f'{stem}.wav' if n == 0 else f'{stem}-{n}.wav'
+    # Next counter after any same-millisecond file already there (even if an earlier
+    # one was pruned), so names within one millisecond still sort in save order.
+    taken = [f[len(stem) + 1:len(stem) + 3] for f in os.listdir(folder)
+             if f.startswith(stem + '-') and f.endswith('.wav')]
+    first = max((int(c) for c in taken if c.isdigit()), default=-1) + 1
+    for n in range(first, 100):
+        name = f'{stem}-{n:02d}.wav'
         path = os.path.join(folder, name)
         try:
             f = open(path, 'xb')  # exclusive create: never overwrite an earlier save
@@ -64,9 +74,16 @@ def save_doubled_audio(audio_data, sample_rate, folder, keep=DOUBLED_AUDIO_KEEP)
         break
     else:
         raise FileExistsError(f'no free file name for {stem}')
-    # Names sort in time order; only our own files are ever pruned.
-    saved = sorted(f for f in os.listdir(folder) if f.startswith('doubled-') and f.endswith('.wav'))
-    for old in saved[:-keep]:
+    # Only our own files are ever pruned, and never the one just written.
+    def age_key(f):
+        try:
+            return (os.path.getmtime(os.path.join(folder, f)), f)
+        except OSError:
+            return (float('-inf'), f)
+    others = sorted((f for f in os.listdir(folder)
+                     if f.startswith('doubled-') and f.endswith('.wav') and f != name),
+                    key=age_key, reverse=True)
+    for old in others[keep - 1:]:
         try:
             os.remove(os.path.join(folder, old))
         except OSError as e:

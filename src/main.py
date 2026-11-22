@@ -308,6 +308,12 @@ class WhisperWriterApp(QObject):
 
         # Only a key recording re-arms continuous mode; a wake recording is always one-shot.
         if source == 'key' and ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
+            # This slot can run before the finishing thread has returned from run();
+            # with no typing to delay us (blank result), start_result_thread would see
+            # it still running and silently not restart. Wait for it, bounded.
+            finishing = self.sender()
+            if finishing is not None and finishing is self.result_thread and finishing.isRunning():
+                finishing.wait(2000)
             self.start_result_thread()
         else:
             self.key_listener.start()

@@ -200,16 +200,28 @@ def is_hallucination(transcription, initial_prompt=None):
         unit = words[:size]
         if len(words) % size == 0 and words == unit * (len(words) // size):
             return True
-    # A known silence phrase or an initial-prompt sentence, once or repeated any
-    # number of times ("Thank you. Thank you." is still silence).
-    phrases = set(SILENCE_PHRASES)
+    # Nothing but known silence phrases and initial-prompt sentences, in any mix,
+    # order or count ("Thank you. Thank you.", "Thank you. Bye."). A transcript
+    # that merely contains one of them among other words is real speech.
+    phrases = {tuple(p.split()) for p in SILENCE_PHRASES}
     if initial_prompt:
-        phrases |= {' '.join(_phrase_key(s)) for s in re.split(r'(?<=[.!?])\s+', initial_prompt) if s.strip()}
-    for phrase in phrases:
-        unit = phrase.split()
-        if unit and len(words) % len(unit) == 0 and words == unit * (len(words) // len(unit)):
-            return True
-    return False
+        phrases |= {tuple(_phrase_key(s)) for s in re.split(r'(?<=[.!?])\s+', initial_prompt) if s.strip()}
+    phrases.discard(())
+    return _tiles(words, phrases)
+
+
+def _tiles(words, phrases):
+    """True when words splits completely into a sequence of phrases (word-boundary DP)."""
+    n = len(words)
+    reachable = [True] + [False] * n  # reachable[i]: words[:i] is fully tiled
+    for i in range(n):
+        if not reachable[i]:
+            continue
+        for p in phrases:
+            j = i + len(p)
+            if j <= n and not reachable[j] and tuple(words[i:j]) == p:
+                reachable[j] = True
+    return reachable[n]
 
 
 MIN_COLLAPSE_UNIT_WORDS = 4
@@ -245,29 +257,19 @@ def post_process_transcription(transcription, on_collapse=None):
     transcript said k>=2 times over is cut back to one copy, on_collapse is
     called with (original, kept) so the caller can record it.
     """
-    transcription = transcription.strip()
+    original = transcription = transcription.strip()
 
     initial_prompt = ConfigManager.get_config_section('model_options')['common'].get('initial_prompt')
-    # The guard sees the ORIGINAL text first: a 3x loop of a short phrase is dropped, never collapsed and typed.
-    if is_hallucination(transcription, initial_prompt):
-        ConfigManager.console_print(f'Dropped a likely silence hallucination ({len(transcription)} characters).')
+
+    def dropped():
+        ConfigManager.console_print(f'Dropped a likely silence hallucination ({len(original)} characters).')
         return ''
 
-    collapsed = collapse_repeat(transcription)
-    if collapsed != transcription:
-        # A doubled silence phrase or prompt sentence collapses to one copy, which must still be dropped.
-        if is_hallucination(collapsed, initial_prompt):
-            ConfigManager.console_print(f'Dropped a likely silence hallucination ({len(transcription)} characters).')
-            return ''
-        ConfigManager.console_print(f'Collapsed a repeated transcript ({len(transcription)} -> {len(collapsed)} characters).')
-        if on_collapse is not None:
-            try:
-                on_collapse(transcription, collapsed)
-            except Exception as e:
-                ConfigManager.console_print(f'Collapse report failed: {e!r}')
-        transcription = collapsed
+    # 1. The guard sees the ORIGINAL text first: a 3x loop of a short phrase is dropped, never collapsed and typed.
+    if is_hallucination(transcription, initial_prompt):
+        return dropped()
 
-    # Clean up common filler words (uh, um)
+    # 2. Clean up common filler words (uh, um)
     transcription = re.sub(r'\b(uh|um)\b[,.]?', '', transcription, flags=re.IGNORECASE)
     
     # Clean up stutters (e.g. "but but but" -> "but")
@@ -277,17 +279,40 @@ def post_process_transcription(transcription, on_collapse=None):
     transcription = re.sub(r'\s{2,}', ' ', transcription)
     transcription = re.sub(r' ,', ',', transcription).strip()
 
+    # 3. The guards see what would actually be typed: cleanup can unmask a
+    #    silence phrase ("Thank you, uh.") or a loop hidden behind a filler.
+    if is_hallucination(transcription, initial_prompt):
+        return dropped()
+
+    # 4. Collapse a whole-transcript repeat; a doubled silence phrase or prompt
+    #    sentence collapses to one copy, which must still be dropped.
+    collapsed = collapse_repeat(transcription)
+    was_collapsed = collapsed != transcription
+    if was_collapsed:
+        if is_hallucination(collapsed, initial_prompt):
+            return dropped()
+        transcription = collapsed
+
+    # 5. Nothing left: return before add_trailing_space can turn silence into a typed ' '.
     post_processing = ConfigManager.get_config_section('post_processing')
     if post_processing['remove_trailing_period'] and transcription.endswith('.'):
         transcription = transcription[:-1]
-    # Nothing left: return before add_trailing_space can turn silence into a typed ' '.
     if not transcription.strip():
         return ''
-    if post_processing['add_trailing_space']:
-        transcription += ' '
     if post_processing['remove_capitalization']:
         transcription = transcription.lower()
 
+    # 6. Report a collapse only when something is typed, with exactly the typed text.
+    if was_collapsed:
+        ConfigManager.console_print(f'Collapsed a repeated transcript ({len(original)} -> {len(transcription)} characters).')
+        if on_collapse is not None:
+            try:
+                on_collapse(original, transcription)
+            except Exception as e:
+                ConfigManager.console_print(f'Collapse report failed: {e!r}')
+
+    if post_processing['add_trailing_space']:
+        transcription += ' '
     return transcription
 
 def transcribe(audio_data, local_model=None, on_collapse=None):
