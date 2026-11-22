@@ -87,7 +87,7 @@ class CollapseTests(unittest.TestCase):
 
     def test_a_collapse_that_lands_on_a_silence_phrase_is_dropped(self):
         # Reaches the second guard only if the first misses it; prove the second guard alone works.
-        with mock.patch('transcription.is_hallucination', side_effect=[False, True]):
+        with mock.patch('transcription.is_hallucination', side_effect=[False, False, True]):
             self.assertEqual(self.pp(DOUBLED), '')
         self.assertEqual(self.reports, [])
 
@@ -153,6 +153,23 @@ class CollapseTests(unittest.TestCase):
                      'Bye for now, see you Monday.']:
             self.assertFalse(is_hallucination(text, PROMPT), text)
             self.assertEqual(self.pp(text), text + ' ', text)
+
+    def test_a_stutter_join_across_the_copy_boundary_still_collapses(self):
+        # Copy 1 ends with the word copy 2 starts with; the stutter cleanup would merge
+        # "go go" and break the exact repeat, so the double must be caught before it.
+        raw = 'go to the store go go to the store go'
+        self.assertEqual(self.pp(raw), 'go to the store go ')
+        self.assertEqual(self.reports, [(raw, 'go to the store go')])
+
+    def test_a_filler_and_a_stutter_join_report_one_collapse_with_the_typed_text(self):
+        raw = 'Um, go to the store go go to the store go'
+        self.assertEqual(self.pp(raw), 'go to the store go ')
+        self.assertEqual(self.reports, [(raw, 'go to the store go')])
+
+    def test_wordless_output_is_never_typed(self):
+        for text in ['.', '...', '?', '♪', '♪ ♪', 'Uh?', 'Um...', '- -']:
+            self.assertEqual(self.pp(text), '', repr(text))
+        self.assertEqual(self.reports, [])
 
     def test_no_callback_is_fine(self):
         self.assertEqual(post_process_transcription(DOUBLED), 'Testing, one, two, three. ')
@@ -305,6 +322,16 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(files), 10)
         self.assertIn(names[-1], files)
 
+    def test_a_non_ascii_digit_counter_is_ignored(self):
+        fixed = mock.Mock()
+        fixed.now.return_value = __import__('datetime').datetime(2026, 11, 22, 10, 0, 0, 123000)
+        os.makedirs(self.folder())
+        odd = 'doubled-20261122-100000-123-²³.wav'  # superscript digits: isdigit() but not int()
+        open(os.path.join(self.folder(), odd), 'wb').close()
+        with mock.patch('datetime.datetime', fixed):
+            name = result_thread.save_doubled_audio(self.audio, self.rate, self.folder())
+        self.assertEqual(name, 'doubled-20261122-100000-123-00.wav')
+
     def test_keep_below_one_is_treated_as_one(self):
         os.makedirs(self.folder())
         for i in range(3):
@@ -394,6 +421,20 @@ class CompletionGateTests(unittest.TestCase):
         self.assertEqual(len(created), 1)
         self.assertIs(app.result_thread, created[0])
         created[0].start.assert_called_once()
+
+    def test_a_thread_that_will_not_exit_is_reported_and_the_restart_skipped(self):
+        cfg(self, 'continuous', 'recording_options', 'recording_mode')
+        app = self.make_app('key')
+        stuck = mock.Mock(source='key', isRunning=mock.Mock(return_value=True), wait=mock.Mock(return_value=False))
+        app.sender = lambda: stuck
+        app.result_thread = stuck
+        app.start_result_thread = lambda *a, **kw: main.WhisperWriterApp.start_result_thread(app, *a, **kw)
+        with mock.patch.object(main, 'ResultThread') as rt, \
+             mock.patch.object(main.ConfigManager, 'console_print') as cp:
+            self.complete(app, ' ')
+        stuck.wait.assert_called_once_with(2000)
+        rt.assert_not_called()
+        self.assertTrue(any('continuous restart skipped' in c.args[0] for c in cp.call_args_list))
 
     def test_without_the_wait_the_restart_would_be_skipped(self):
         # Guards the test above: the real start_result_thread does refuse while the old thread runs.

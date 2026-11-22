@@ -51,7 +51,7 @@ def save_doubled_audio(audio_data, sample_rate, folder, keep=DOUBLED_AUDIO_KEEP)
     # one was pruned), so names within one millisecond still sort in save order.
     taken = [f[len(stem) + 1:len(stem) + 3] for f in os.listdir(folder)
              if f.startswith(stem + '-') and f.endswith('.wav')]
-    first = max((int(c) for c in taken if c.isdigit()), default=-1) + 1
+    first = max((int(c) for c in taken if c.isascii() and c.isdigit()), default=-1) + 1
     for n in range(first, 100):
         name = f'{stem}-{n:02d}.wav'
         path = os.path.join(folder, name)

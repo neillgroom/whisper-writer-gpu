@@ -250,6 +250,23 @@ def collapse_repeat(text):
     return text
 
 
+def _guard_and_collapse(text, initial_prompt):
+    """
+    One guard pass: (None, False) when text is a hallucination; otherwise collapse
+    a whole-transcript repeat and return (kept, True), unless the kept copy is
+    itself a hallucination (a doubled silence phrase) -> (None, False). Text with
+    no repeat comes back as (text, False).
+    """
+    if is_hallucination(text, initial_prompt):
+        return None, False
+    collapsed = collapse_repeat(text)
+    if collapsed == text:
+        return text, False
+    if is_hallucination(collapsed, initial_prompt):
+        return None, False
+    return collapsed, True
+
+
 def post_process_transcription(transcription, on_collapse=None):
     """
     Apply post-processing to the transcription. A blank or hallucinated
@@ -269,40 +286,36 @@ def post_process_transcription(transcription, on_collapse=None):
     if is_hallucination(transcription, initial_prompt):
         return dropped()
 
-    # 2. Clean up common filler words (uh, um)
+    # 2. Clean up common filler words (uh, um), then guard: removing a filler can
+    #    unmask a silence phrase ("Thank you, uh.") or a loop or a double.
     transcription = re.sub(r'\b(uh|um)\b[,.]?', '', transcription, flags=re.IGNORECASE)
-    
-    # Clean up stutters (e.g. "but but but" -> "but")
-    transcription = re.sub(r'\b(\w+)(?:[,\s]+\1\b)+', r'\1', transcription, flags=re.IGNORECASE)
-    
-    # Clean up any resulting double spaces or orphaned commas
-    transcription = re.sub(r'\s{2,}', ' ', transcription)
-    transcription = re.sub(r' ,', ',', transcription).strip()
-
-    # 3. The guards see what would actually be typed: cleanup can unmask a
-    #    silence phrase ("Thank you, uh.") or a loop hidden behind a filler.
-    if is_hallucination(transcription, initial_prompt):
+    transcription, collapsed_1 = _guard_and_collapse(transcription, initial_prompt)
+    if transcription is None:
         return dropped()
 
-    # 4. Collapse a whole-transcript repeat; a doubled silence phrase or prompt
-    #    sentence collapses to one copy, which must still be dropped.
-    collapsed = collapse_repeat(transcription)
-    was_collapsed = collapsed != transcription
-    if was_collapsed:
-        if is_hallucination(collapsed, initial_prompt):
-            return dropped()
-        transcription = collapsed
+    # 3. Clean up stutters (e.g. "but but but" -> "but"), double spaces and orphaned
+    #    commas, then guard again on what would actually be typed. Step 2 ran first
+    #    because the stutter merge can join copy 1's last word to copy 2's first
+    #    ("...store go go to the...") and break an exact repeat.
+    transcription = re.sub(r'\b(\w+)(?:[,\s]+\1\b)+', r'\1', transcription, flags=re.IGNORECASE)
+    transcription = re.sub(r'\s{2,}', ' ', transcription)
+    transcription = re.sub(r' ,', ',', transcription).strip()
+    transcription, collapsed_2 = _guard_and_collapse(transcription, initial_prompt)
+    if transcription is None:
+        return dropped()
+    was_collapsed = collapsed_1 or collapsed_2
 
-    # 5. Nothing left: return before add_trailing_space can turn silence into a typed ' '.
+    # 4. No words left (".", "...", a music note): return before add_trailing_space
+    #    can turn silence into a typed ' ' or punctuation.
     post_processing = ConfigManager.get_config_section('post_processing')
     if post_processing['remove_trailing_period'] and transcription.endswith('.'):
         transcription = transcription[:-1]
-    if not transcription.strip():
+    if not _phrase_key(transcription):
         return ''
     if post_processing['remove_capitalization']:
         transcription = transcription.lower()
 
-    # 6. Report a collapse only when something is typed, with exactly the typed text.
+    # 5. Report a collapse (at most once) only when something is typed, with exactly the typed text.
     if was_collapsed:
         ConfigManager.console_print(f'Collapsed a repeated transcript ({len(original)} -> {len(transcription)} characters).')
         if on_collapse is not None:

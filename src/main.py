@@ -313,7 +313,9 @@ class WhisperWriterApp(QObject):
             # it still running and silently not restart. Wait for it, bounded.
             finishing = self.sender()
             if finishing is not None and finishing is self.result_thread and finishing.isRunning():
-                finishing.wait(2000)
+                if not finishing.wait(2000):
+                    ConfigManager.console_print('The finishing recording thread did not exit within 2 s; '
+                                                'continuous restart skipped.')
             self.start_result_thread()
         else:
             self.key_listener.start()
