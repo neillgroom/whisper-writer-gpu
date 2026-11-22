@@ -48,9 +48,18 @@ class FakeVad:
         return self.speech
 
 
+# Fake host-API layout so extra_settings never touches the real Windows device list:
+# index 5 is a WASAPI input, index 6 an MME input.
+HOSTAPIS = [{'name': 'MME'}, {'name': 'Windows WASAPI'}]
+DEVICES = [{'name': f'dev{i}', 'hostapi': 1, 'max_input_channels': 1} for i in range(6)] + \
+          [{'name': 'dev6', 'hostapi': 0, 'max_input_channels': 1}]
+
+
 def run_record(thread, feed=True, speech=False):
     FakeStream.instances.clear()
     with mock.patch.object(result_thread.sd, 'InputStream', lambda **kw: FakeStream(feed=feed, **kw)), \
+         mock.patch.object(sd, 'query_devices', return_value=DEVICES), \
+         mock.patch.object(sd, 'query_hostapis', return_value=HOSTAPIS), \
          mock.patch.object(result_thread.webrtcvad, 'Vad', lambda aggressiveness: FakeVad(speech)):
         thread.is_running = True
         thread.is_recording = True
@@ -168,6 +177,25 @@ class WakeRecordingTests(unittest.TestCase):
         threading.Timer(0.2, thread.stop_recording).start()
         _, _, stream = run_record(thread)
         self.assertIsNone(stream.kwargs['device'])
+        self.assertIsNone(stream.kwargs['extra_settings'])
+
+    def run_key_on_device(self, index):
+        set_config('press_to_toggle', 'recording_options', 'recording_mode')
+        set_config(index, 'recording_options', 'sound_device')
+        self.addCleanup(set_config, None, 'recording_options', 'sound_device')
+        thread = ResultThread(source='key', device=None)
+        threading.Timer(0.2, thread.stop_recording).start()
+        _, _, stream = run_record(thread)
+        return stream
+
+    def test_key_recording_on_a_configured_wasapi_device_gets_auto_convert(self):
+        stream = self.run_key_on_device(5)
+        self.assertEqual(stream.kwargs['device'], 5)
+        self.assertIsInstance(stream.kwargs['extra_settings'], sd.WasapiSettings)
+
+    def test_key_recording_on_a_configured_non_wasapi_device_gets_no_wasapi_settings(self):
+        stream = self.run_key_on_device(6)
+        self.assertEqual(stream.kwargs['device'], 6)
         self.assertIsNone(stream.kwargs['extra_settings'])
 
 

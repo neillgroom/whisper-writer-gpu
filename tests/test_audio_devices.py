@@ -57,9 +57,35 @@ class ResolveInputTests(unittest.TestCase):
 
 
 class ExtraSettingsTests(unittest.TestCase):
-    def test_auto_convert_only_for_a_resolved_index(self):
+    def setUp(self):
+        patches = [mock.patch.object(audio_devices.sd, 'query_devices', return_value=DEVICES),
+                   mock.patch.object(audio_devices.sd, 'query_hostapis', return_value=HOSTAPIS)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_none_gets_nothing(self):
         self.assertIsNone(extra_settings(None))
+
+    def test_wasapi_index_gets_auto_convert(self):
         self.assertIsInstance(extra_settings(2), sd.WasapiSettings)
+
+    def test_non_wasapi_index_gets_nothing(self):
+        self.assertIsNone(extra_settings(0))  # MME
+        self.assertIsNone(extra_settings(4))  # WDM-KS
+
+    def test_stale_out_of_range_or_negative_index_gets_nothing(self):
+        self.assertIsNone(extra_settings(len(DEVICES)))
+        self.assertIsNone(extra_settings(99))
+        self.assertIsNone(extra_settings(-1))  # would wrap to the last (WASAPI) device
+        with mock.patch.object(audio_devices.sd, 'query_devices', return_value=[]):
+            self.assertIsNone(extra_settings(0))
+
+    def test_a_lookup_error_returns_none_instead_of_raising(self):
+        with mock.patch.object(audio_devices.sd, 'query_devices', side_effect=OSError('backend')):
+            self.assertIsNone(extra_settings(2))
+        with mock.patch.object(audio_devices.sd, 'query_hostapis', side_effect=OSError('backend')):
+            self.assertIsNone(extra_settings(2))
 
 
 if __name__ == '__main__':

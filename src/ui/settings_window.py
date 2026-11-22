@@ -13,6 +13,22 @@ from utils import ConfigManager
 
 load_dotenv()
 
+
+def display_text(value):
+    """Text for a line edit: a null setting shows as an empty field, never the word 'None'."""
+    return '' if value is None else str(value)
+
+
+def parse_typed_text(text, value_type):
+    """Line-edit text back to a setting value: an empty (or blank) int/float/str field saves as None."""
+    text = text.strip() if value_type in ('int', 'float') else text
+    if value_type == 'int':
+        return int(text) if text else None
+    if value_type == 'float':
+        return float(text) if text else None
+    return text or None
+
+
 class SettingsWindow(BaseWindow):
     settings_closed = pyqtSignal()
     settings_saved = pyqtSignal()
@@ -115,7 +131,7 @@ class SettingsWindow(BaseWindow):
         elif meta_type == 'str':
             return self.create_line_edit(current_value, key)
         elif meta_type in ['int', 'float']:
-            return self.create_line_edit(str(current_value))
+            return self.create_line_edit(display_text(current_value))
         return None
 
     def create_checkbox(self, value, key):
@@ -224,7 +240,7 @@ class SettingsWindow(BaseWindow):
         elif isinstance(widget, QComboBox):
             widget.setCurrentText(value)
         elif isinstance(widget, QLineEdit):
-            widget.setText(str(value) if value is not None else '')
+            widget.setText(display_text(value))
         elif isinstance(widget, QWidget) and widget.layout():
             # This is for the model_path widget
             line_edit = widget.layout().itemAt(0).widget()
@@ -238,13 +254,7 @@ class SettingsWindow(BaseWindow):
         elif isinstance(widget, QComboBox):
             return widget.currentText() or None
         elif isinstance(widget, QLineEdit):
-            text = widget.text()
-            if value_type == 'int':
-                return int(text) if text else None
-            elif value_type == 'float':
-                return float(text) if text else None
-            else:
-                return text or None
+            return parse_typed_text(widget.text(), value_type)
         elif isinstance(widget, QWidget) and widget.layout():
             # This is for the model_path widget
             line_edit = widget.layout().itemAt(0).widget()

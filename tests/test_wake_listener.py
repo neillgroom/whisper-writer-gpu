@@ -283,10 +283,15 @@ class WakeListenerTests(unittest.TestCase):
         def capture(**kw):
             opened.update(kw)
             return FakeStream(frames=0, **kw)
-        wake, _, _ = listener(capture)
-        wake.start()
-        time.sleep(0.1)
-        wake.stop()
+        # Fake host APIs so extra_settings sees index 3 as WASAPI without touching real devices.
+        devices = [{'name': f'dev{i}', 'hostapi': 1, 'max_input_channels': 1} for i in range(4)]
+        hostapis = [{'name': 'MME'}, {'name': 'Windows WASAPI'}]
+        with mock.patch('sounddevice.query_devices', return_value=devices), \
+             mock.patch('sounddevice.query_hostapis', return_value=hostapis):
+            wake, _, _ = listener(capture)
+            wake.start()
+            time.sleep(0.1)
+            wake.stop()
         self.assertEqual(opened['device'], 3)
         self.assertIsNotNone(opened['extra_settings'])
 

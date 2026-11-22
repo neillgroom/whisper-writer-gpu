@@ -55,9 +55,21 @@ def resolve_input(substring, devices=None, hostapis=None):
 
 def extra_settings(device):
     """
-    WASAPI resamples to our 16 kHz only when asked. A resolved index always gets
-    auto_convert; device=None (the system default via MME) gets nothing, as before.
+    WASAPI resamples to our 16 kHz only when asked. An index on the WASAPI host
+    API gets auto_convert. device=None (the system default via MME), a non-WASAPI
+    index (WasapiSettings there makes the stream open raise PortAudioError), and a
+    stale, out-of-range or negative index get nothing. Never raises.
     """
     if device is None:
         return None
-    return sd.WasapiSettings(auto_convert=True)
+    try:
+        devices = sd.query_devices()
+        if not 0 <= device < len(devices):
+            return None
+        hostapi = sd.query_hostapis()[devices[device]['hostapi']]
+        if 'WASAPI' not in hostapi['name']:
+            return None
+        return sd.WasapiSettings(auto_convert=True)
+    except Exception as error:
+        ConfigManager.console_print(f'Host API lookup for device {device} failed: {error}')
+        return None
