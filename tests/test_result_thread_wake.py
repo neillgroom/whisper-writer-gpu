@@ -220,7 +220,7 @@ class ComInitTests(unittest.TestCase):
         with mock.patch.object(result_thread, 'com_initialize', lambda: order.append('init') or held), \
              mock.patch.object(result_thread, 'com_uninitialize', lambda h: order.append(('uninit', h))), \
              mock.patch.object(thread, '_record_audio', lambda: body(order)), \
-             mock.patch.object(result_thread, 'transcribe', lambda audio, model: 'hello'), \
+             mock.patch.object(result_thread, 'transcribe', lambda audio, model, on_collapse=None: 'hello'), \
              mock.patch('builtins.open', mock.mock_open()):
             thread.is_running = True
             thread.run()

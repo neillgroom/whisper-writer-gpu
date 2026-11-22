@@ -16,6 +16,102 @@ from utils import ConfigManager
 
 WAKE_TAIL_GUARD_S = 0.4  # start of a wake recording ignored as the tail of the wake word
 
+# history.log and doubled-audio/ live in the install root (the folder above src/).
+# Tests patch INSTALL_ROOT to a temp dir, so they never touch the real files.
+INSTALL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DOUBLED_AUDIO_DIRNAME = 'doubled-audio'
+DOUBLED_AUDIO_KEEP = 10
+
+
+def history_path():
+    return os.path.join(INSTALL_ROOT, 'history.log')
+
+
+def doubled_audio_dir():
+    return os.path.join(INSTALL_ROOT, DOUBLED_AUDIO_DIRNAME)
+
+
+def save_doubled_audio(audio_data, sample_rate, folder, keep=DOUBLED_AUDIO_KEEP):
+    """
+    Save a recording whose transcript came back doubled as a 16-bit mono WAV in
+    `folder`, named from the local time to the millisecond plus a two-digit
+    counter (doubled-YYYYmmdd-HHMMSS-mmm-NN.wav), then delete all but `keep` of
+    these files: the one just written plus the keep-1 newest others by
+    modification time (name breaks ties). The new file is never pruned, even
+    after the clock steps back. keep < 1 is treated as 1: the save exists to be
+    examined, so it is always kept. Returns the file name. Raises on failure;
+    the caller decides what that means.
+    """
+    from datetime import datetime
+    keep = max(1, int(keep))
+    os.makedirs(folder, exist_ok=True)
+    stem = 'doubled-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f')[:-3]
+    frames = np.asarray(audio_data, dtype=np.int16).tobytes()
+    # Next counter after any same-millisecond file already there (even if an earlier
+    # one was pruned), so names within one millisecond still sort in save order.
+    taken = [f[len(stem) + 1:len(stem) + 3] for f in os.listdir(folder)
+             if f.startswith(stem + '-') and f.endswith('.wav')]
+    first = max((int(c) for c in taken if c.isascii() and c.isdigit()), default=-1) + 1
+    for n in range(first, 100):
+        name = f'{stem}-{n:02d}.wav'
+        path = os.path.join(folder, name)
+        try:
+            f = open(path, 'xb')  # exclusive create: never overwrite an earlier save
+        except FileExistsError:
+            continue
+        try:
+            with f, wave.open(f, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(int(sample_rate))
+                wf.writeframes(frames)
+        except Exception:
+            try:
+                os.remove(path)  # no half-written file left behind
+            except OSError:
+                pass
+            raise
+        break
+    else:
+        raise FileExistsError(f'no free file name for {stem}')
+    # Only our own files are ever pruned, and never the one just written.
+    def age_key(f):
+        try:
+            return (os.path.getmtime(os.path.join(folder, f)), f)
+        except OSError:
+            return (float('-inf'), f)
+    others = sorted((f for f in os.listdir(folder)
+                     if f.startswith('doubled-') and f.endswith('.wav') and f != name),
+                    key=age_key, reverse=True)
+    for old in others[keep - 1:]:
+        try:
+            os.remove(os.path.join(folder, old))
+        except OSError as e:
+            ConfigManager.console_print(f'Could not prune {old}: {e!r}')
+    return name
+
+
+def record_collapse(original, kept, audio_data, sample_rate):
+    """
+    Best-effort evidence for a collapsed (doubled) transcript: save the audio and
+    append one JSON line to history.log naming the file (null if the save failed).
+    Never raises, so dictation always goes on.
+    """
+    import json
+    from datetime import datetime
+    saved = None
+    try:
+        saved = save_doubled_audio(audio_data, sample_rate or 16000, doubled_audio_dir())
+    except Exception as e:
+        ConfigManager.console_print(f'Could not save doubled audio: {e!r}')
+    try:
+        line = json.dumps({'ts': f'{datetime.now():%Y-%m-%d %H:%M:%S}', 'event': 'COLLAPSED',
+                           'original': original, 'kept': kept, 'audio': saved}, ensure_ascii=False)
+        with open(history_path(), 'a', encoding='utf-8') as hf:
+            hf.write(line + '\n')
+    except Exception as e:
+        ConfigManager.console_print(f'Could not log the collapse: {e!r}')
+
 
 class ResultThread(QThread):
     """
@@ -119,19 +215,22 @@ class ResultThread(QThread):
 
             # Time the transcription process
             start_time = time.time()
-            result = transcribe(audio_data, self.local_model)
+            collapses = []
+            result = transcribe(audio_data, self.local_model,
+                                on_collapse=lambda original, kept: collapses.append((original, kept)))
             end_time = time.time()
+            for original, kept in collapses:
+                record_collapse(original, kept, audio_data, self.sample_rate)
 
             transcription_time = end_time - start_time
             ConfigManager.console_print(f'Transcription completed in {transcription_time:.2f} seconds. Post-processed line: {result}')
 
             # Persist every transcription: launched via pythonw.exe, console output
             # is discarded, so without this file a lost paste is unrecoverable.
-            if result:
+            if result.strip():
                 try:
                     from datetime import datetime
-                    history_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'history.log')
-                    with open(history_path, 'a', encoding='utf-8') as hf:
+                    with open(history_path(), 'a', encoding='utf-8') as hf:
                         hf.write(f'{datetime.now():%Y-%m-%d %H:%M:%S}\t{result}\n')
                 except Exception:
                     pass  # history is best-effort; never block the paste
