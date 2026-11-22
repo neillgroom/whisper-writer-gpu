@@ -1,0 +1,3 @@
+# The script imports `hid` and uses hid.device() / open_path(): that is the Cython
+# `hidapi` distribution, NOT the ctypes `hid` distribution (which exposes hid.Device).
+hidapi==0.15.0

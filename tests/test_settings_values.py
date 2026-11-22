@@ -149,13 +149,19 @@ class SaveSettingsWindowTests(unittest.TestCase):
 
     def test_a_blank_nullable_number_saves_as_none(self):
         self.field(self.QLineEdit, 'recording_options_sound_device_input').setText('')
+        import os
+        env_before = dict(os.environ)
         p = self.save_patched()
+        # save_settings writes os.environ['OPENAI_API_KEY']; patch.dict restores the environment.
         with p[0] as warning, p[1], p[2] as set_value, p[3] as save, p[4], \
-             self.mock.patch.object(self.window, 'close'):
+             self.mock.patch.object(self.window, 'close'), \
+             self.mock.patch.dict(os.environ):
             self.window.save_settings()
+            self.assertIn('OPENAI_API_KEY', os.environ)  # the write really happens in here
         warning.assert_not_called()
         set_value.assert_any_call(None, 'recording_options', 'sound_device')
         save.assert_called_once()
+        self.assertEqual(dict(os.environ), env_before)  # nothing leaks into later tests
 
     def test_reset_keeps_an_unknown_model_and_tolerates_none(self):
         combo = self.field(self.QComboBox, 'model_options_local_model_input')
