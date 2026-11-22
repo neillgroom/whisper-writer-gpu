@@ -33,6 +33,9 @@ class InputSimulator:
 
         if self.input_method == 'pynput':
             self.keyboard = PynputController()
+        elif self.input_method == 'paste':
+            # Paste delivery still needs a controller for the Ctrl+V keystroke.
+            self.keyboard = PynputController()
         elif self.input_method == 'dotool':
             self._initialize_dotool()
 
@@ -66,6 +69,8 @@ class InputSimulator:
         interval = ConfigManager.get_config_value('post_processing', 'writing_key_press_delay')
         if self.input_method == 'pynput':
             return self._typewrite_pynput(text, interval, should_continue)
+        if self.input_method == 'paste':
+            return self._typewrite_paste(text, should_continue)
         # ydotool/dotool type the whole string in one call, so the check can only run once.
         if should_continue is not None and not should_continue():
             return text
@@ -79,6 +84,11 @@ class InputSimulator:
         """
         Simulate typing using pynput.
 
+        Capitals and other Shift-requiring characters are sent as a real
+        Shift+key press. pynput's default path sends them as VK_PACKET Unicode
+        events, which terminals and TUIs frequently drop -- the missing-initial-
+        capital "esting" gibberish. Real VK events work everywhere.
+
         Args:
             text (str): The text to type.
             interval (float): The interval between keystrokes in seconds.
@@ -87,12 +97,75 @@ class InputSimulator:
         Returns:
             str: The untyped remainder.
         """
+        from pynput.keyboard import Key
+        shift = Key.shift
+        # Defensive: if a previous typing pass was interrupted mid-capital, its
+        # Shift press may still be latched. A stuck Shift turns every later
+        # keystroke into selection-extension, so the next text REPLACES the
+        # selection instead of inserting -- "it deletes my text". Releasing an
+        # unpressed key is a no-op, so this is always safe.
+        self.keyboard.release(shift)
         for index, char in enumerate(text):
             if should_continue is not None and not should_continue():
                 return text[index:]
-            self.keyboard.press(char)
-            self.keyboard.release(char)
+            if char.isupper():
+                # pressed() guarantees the Shift release even if the press of
+                # the character raises, so a latch can never survive an error.
+                with self.keyboard.pressed(shift):
+                    self.keyboard.press(char.lower())
+                    self.keyboard.release(char.lower())
+            else:
+                self.keyboard.press(char)
+                self.keyboard.release(char)
             time.sleep(interval)
+        return ''
+
+    def _typewrite_paste(self, text, should_continue=None):
+        """
+        Deliver `text` as one clipboard paste: copy, Ctrl+V.
+
+        The previous clipboard contents are NOT restored on a timer: a slow or
+        busy target processes the injected Ctrl+V late, and a mid-flight restore
+        would make it paste the OLD clipboard instead of the transcript. Instead,
+        whatever we borrowed is given back at the START of the next paste, when
+        nothing is waiting to read it.
+
+        Per-key injection drops characters on some targets -- pynput sends every
+        Shift-requiring character (capitals, punctuation) as a VK_PACKET Unicode
+        event, which terminals and TUIs often mishandle -- so the whole line
+        arrives as a single paste instead.
+        """
+        import pyperclip
+        from pynput.keyboard import Key
+
+        if should_continue is not None and not should_continue():
+            return text
+        backup = getattr(self, '_paste_backup', None)
+        if backup is not None:
+            try:
+                pyperclip.copy(backup)
+            except Exception:
+                pass
+            self._paste_backup = None
+        try:
+            previous = pyperclip.paste()
+        except Exception:
+            previous = None
+        pyperclip.copy(text)
+        # A clipboard locked by another process can swallow the write; verify
+        # the read-back matches before pasting, retry briefly, else give up
+        # with the remainder rather than paste stale content.
+        for _ in range(4):
+            if pyperclip.paste() == text:
+                break
+            time.sleep(0.05)
+            pyperclip.copy(text)
+        else:
+            return text
+        self._paste_backup = previous
+        with self.keyboard.pressed(Key.ctrl):
+            self.keyboard.press('v')
+            self.keyboard.release('v')
         return ''
 
     def _typewrite_ydotool(self, text, interval):

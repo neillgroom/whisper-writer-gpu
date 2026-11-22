@@ -195,7 +195,7 @@ class ResultThread(QThread):
 
         stream = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
                                 blocksize=frame_size, device=device,
-                                extra_settings=extra_settings(device) if is_wake else None,
+                                extra_settings=extra_settings(device) if device is not None else None,
                                 callback=audio_callback)
         self._stream = stream  # publish BEFORE start so stop() can abort a hung open
         try:
