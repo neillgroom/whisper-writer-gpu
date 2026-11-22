@@ -1,8 +1,28 @@
+import sys
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from typing import Callable, Set
 
 from utils import ConfigManager
+
+
+_MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)  # VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN
+
+# Bound once at import, not inside the hook callback. A private WinDLL instance so setting
+# argtypes/restype does not mutate the shared windll.user32 object other code uses.
+_get_async_key_state = None
+if sys.platform == 'win32':
+    import ctypes
+    _get_async_key_state = ctypes.WinDLL('user32').GetAsyncKeyState
+    _get_async_key_state.argtypes = [ctypes.c_int]
+    _get_async_key_state.restype = ctypes.c_short
+
+
+def any_modifier_down() -> bool:
+    """True when Shift, Ctrl, Alt or Win is physically down (win32 only; False elsewhere)."""
+    if sys.platform != 'win32' or _get_async_key_state is None:
+        return False
+    return any(_get_async_key_state(vk) & 0x8000 for vk in _MODIFIER_VKS)
 
 
 class InputEvent(Enum):
@@ -199,6 +219,13 @@ class KeyCode(Enum):
     MOUSE_SIDE2 = auto()
     MOUSE_SIDE3 = auto()
 
+# The only activation keys that may be swallowed: keys that never produce text. InputSimulator
+# types characters (letters, digits, punctuation, space, enter, tab) through the same SendInput
+# path the hook sees, so swallowing a key typing can produce would eat the app's own dictated text
+# and self-trigger recording. (F21-F24 are left out: _create_key_map has no pynput entry for them.)
+SWALLOWABLE_KEYS = frozenset({KeyCode.PAUSE, KeyCode.SCROLL_LOCK} | {KeyCode[f'F{n}'] for n in range(1, 21)})
+
+
 class InputBackend(ABC):
     """
     Abstract base class for input backends.
@@ -322,6 +349,7 @@ class KeyListener:
             raise RuntimeError("No supported input backend found")
         self.active_backend = self.backends[0]
         self.active_backend.on_input_event = self.on_input_event
+        self.active_backend.get_swallow_keys = self.get_swallow_keys
 
     def set_active_backend(self, backend_class):
         """Set a specific backend as active."""
@@ -331,6 +359,7 @@ class KeyListener:
                 self.stop()
             self.active_backend = new_backend
             self.active_backend.on_input_event = self.on_input_event
+            self.active_backend.get_swallow_keys = self.get_swallow_keys
             self.start()
         else:
             raise ValueError(f"Backend {backend_class.__name__} is not available")
@@ -354,8 +383,13 @@ class KeyListener:
     def load_activation_keys(self):
         """Load activation keys from configuration."""
         key_combination = ConfigManager.get_config_value('recording_options', 'activation_key')
+        self._has_unknown_token = False
         keys = self.parse_key_combination(key_combination)
         self.set_activation_keys(keys)
+        # parse_key_combination drops unknown or empty tokens ('win+space' -> {SPACE}); never
+        # swallow a key the user did not actually configure on its own.
+        if self._has_unknown_token:
+            self.swallow_keys = frozenset()
 
     def parse_key_combination(self, combination_string: str) -> Set[KeyCode | frozenset[KeyCode]]:
         """Parse a string representation of key combination into a set of KeyCodes."""
@@ -376,12 +410,34 @@ class KeyListener:
                     keycode = KeyCode[key]
                     keys.add(keycode)
                 except KeyError:
+                    self._has_unknown_token = True
                     print(f"Unknown key: {key}")
         return keys
 
     def set_activation_keys(self, keys: Set[KeyCode]):
         """Set the activation keys for the KeyChord."""
         self.key_chord = KeyChord(keys)
+        self.swallow_keys = self._derive_swallow_keys(keys)
+
+    @staticmethod
+    def _derive_swallow_keys(keys) -> frozenset:
+        """
+        Keys the backend should consume instead of passing to the focused window.
+
+        Only a chord of exactly one key from SWALLOWABLE_KEYS is swallowed. Held, it auto-repeats,
+        and every repeat reaching the focused window does damage (Windows Terminal turns each Pause
+        key-down into Ctrl+Z). Every other chord swallows nothing, as before.
+        """
+        if len(keys) != 1:
+            return frozenset()
+        key = next(iter(keys))
+        if key not in SWALLOWABLE_KEYS:
+            return frozenset()
+        return frozenset({key})
+
+    def get_swallow_keys(self) -> frozenset:
+        """Return the keys to swallow for the current activation chord (read by the backend at event time)."""
+        return self.swallow_keys
 
     def on_input_event(self, event):
         """Handle input events and trigger callbacks if the key chord becomes active or inactive."""
@@ -760,6 +816,13 @@ class PynputBackend(InputBackend):
         self.keyboard = None
         self.mouse = None
         self.key_map = None
+        self.vk_map = {}
+        self.swallowed_down = set()  # vks whose key-down was swallowed and whose key-up is pending
+        self.passed_down = set()  # swallowable vks whose key-down was passed through (modifier held)
+
+    def get_swallow_keys(self) -> frozenset:
+        """Keys to consume; replaced by the KeyListener with its own accessor."""
+        return frozenset()
 
     def start(self):
         """Start listening for keyboard and mouse events. Safe to call repeatedly."""
@@ -774,11 +837,25 @@ class PynputBackend(InputBackend):
             self.keyboard = keyboard
             self.mouse = mouse
             self.key_map = self._create_key_map()
+            self.vk_map = self._create_vk_map()
 
-        self.keyboard_listener = self.keyboard.Listener(
-            on_press=self._on_keyboard_press,
-            on_release=self._on_keyboard_release
-        )
+        if sys.platform == 'win32':
+            # The filter suppresses through its own listener, never self.keyboard_listener, which
+            # stop() may null from another thread mid-event. The holder is filled before start(),
+            # and the hook (the only caller of the filter) is installed only once start() runs.
+            holder = []
+            listener = self.keyboard.Listener(
+                on_press=self._on_keyboard_press,
+                on_release=self._on_keyboard_release,
+                win32_event_filter=lambda msg, data: self._win32_event_filter(msg, data, holder[0])
+            )
+            holder.append(listener)
+            self.keyboard_listener = listener
+        else:
+            self.keyboard_listener = self.keyboard.Listener(
+                on_press=self._on_keyboard_press,
+                on_release=self._on_keyboard_release
+            )
         self.mouse_listener = self.mouse.Listener(
             on_click=self._on_mouse_click
         )
@@ -787,6 +864,8 @@ class PynputBackend(InputBackend):
 
     def stop(self):
         """Stop listening for keyboard and mouse events."""
+        self.swallowed_down.clear()
+        self.passed_down.clear()
         if self.keyboard_listener:
             self.keyboard_listener.stop()
             self.keyboard_listener = None
@@ -800,6 +879,68 @@ class PynputBackend(InputBackend):
         key_code = self.key_map.get(pynput_key, KeyCode.SPACE)
         event_type = InputEvent.KEY_PRESS if is_press else InputEvent.KEY_RELEASE
         return key_code, event_type
+
+    _WIN32_KEY_DOWN = (0x0100, 0x0104)  # WM_KEYDOWN, WM_SYSKEYDOWN
+    _WIN32_KEY_UP = (0x0101, 0x0105)  # WM_KEYUP, WM_SYSKEYUP
+
+    def _win32_event_filter(self, msg, data, listener):
+        """
+        pynput win32 event filter: consume the activation key so it never reaches the focused window.
+
+        pynput 1.7.6 does not call on_press/on_release for a suppressed event, so a swallowed key is
+        dispatched to on_input_event here. Every other key returns True and passes through untouched.
+        """
+        vk = data.vkCode
+        key_code = self.vk_map.get(vk)
+        if key_code is None:
+            return True
+        # The swallow/pass decision is made once, at the first key-down of a hold, and kept for every
+        # repeat and the key-up, whatever the modifiers do mid-hold: never half a keystroke.
+        if msg in self._WIN32_KEY_UP:
+            if vk in self.passed_down:
+                self.passed_down.discard(vk)
+                return True
+            if vk not in self.swallowed_down:
+                return True
+            self.swallowed_down.discard(vk)
+            event_type = InputEvent.KEY_RELEASE
+        elif msg in self._WIN32_KEY_DOWN:
+            if vk in self.passed_down:
+                return True
+            if vk not in self.swallowed_down:
+                if key_code not in self.get_swallow_keys():
+                    return True
+                try:
+                    modified = any_modifier_down()
+                except Exception:
+                    modified = False  # unknown state: swallow; a leaked Ctrl+Z flood is the worse failure
+                if modified:
+                    self.passed_down.add(vk)
+                    return True  # Alt+F4, Win+Pause etc. pass through exactly as before
+                self.swallowed_down.add(vk)
+            event_type = InputEvent.KEY_PRESS
+        else:
+            return True
+        try:
+            self.on_input_event((key_code, event_type))
+        except Exception as e:
+            # Our own dispatch failing must not escape into pynput, which stops the listener on any
+            # exception other than its suppress signal.
+            print(f"Error dispatching swallowed key {key_code}: {e}")
+        finally:
+            # Unconditional: neither a dispatch failure nor a failing print may leak the key (each
+            # leaked Pause repeat is a Ctrl+Z in the terminal). Raised here, after the except clause,
+            # so `except Exception` above never catches pynput's SuppressException.
+            listener.suppress_event()
+
+    def _create_vk_map(self):
+        """Reverse lookup from Windows virtual-key code to our KeyCode, derived from key_map."""
+        vk_map = {}
+        for pynput_key, key_code in self.key_map.items():
+            vk = getattr(getattr(pynput_key, 'value', pynput_key), 'vk', None)
+            if vk is not None:
+                vk_map.setdefault(vk, key_code)
+        return vk_map
 
     def _on_keyboard_press(self, key):
         """Handle keyboard press events."""
