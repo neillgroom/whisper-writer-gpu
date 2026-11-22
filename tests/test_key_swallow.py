@@ -9,9 +9,9 @@ from key_listener import InputEvent, KeyCode, KeyListener, PynputBackend
 from pynput import keyboard as real_keyboard, mouse as real_mouse
 
 WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0100, 0x0101, 0x0104, 0x0105
-VK_PAUSE, VK_A, VK_F5, VK_SPACE, VK_LCONTROL = 0x13, 0x41, 0x74, 0x20, 0xA2
+VK_PAUSE, VK_SCROLL, VK_F5, VK_A, VK_SPACE, VK_ENTER, VK_TAB, VK_LCONTROL = (
+    0x13, 0x91, 0x74, 0x41, 0x20, 0x0D, 0x09, 0xA2)
 VK_OEM_3 = 0xC0  # backquote on a US layout
-FAKE_LAYOUT = {'`': VK_OEM_3, 'a': VK_A}
 
 
 class Suppressed(Exception):
@@ -55,7 +55,13 @@ def fake_pynput():
     return module
 
 
-def make_listener(activation_key, layout=FAKE_LAYOUT):
+def start_backend(backend):
+    with mock.patch.dict(sys.modules, {'pynput': fake_pynput()}), \
+            mock.patch.object(key_listener.sys, 'platform', 'win32'):
+        backend.start()
+
+
+def make_listener(activation_key):
     """Build a KeyListener and start its PynputBackend through the real start() path, as on win32."""
     config = {'activation_key': activation_key, 'input_backend': 'auto'}
     with mock.patch.object(key_listener.ConfigManager, 'get_config_value',
@@ -64,10 +70,7 @@ def make_listener(activation_key, layout=FAKE_LAYOUT):
     backend = PynputBackend()
     listener.backends = [backend]
     listener.select_active_backend()
-    with mock.patch.dict(sys.modules, {'pynput': fake_pynput()}), \
-            mock.patch.object(key_listener.sys, 'platform', 'win32'), \
-            mock.patch.object(key_listener, 'resolve_char_vk', side_effect=layout.get):
-        backend.start()
+    start_backend(backend)
     return listener, backend
 
 
@@ -77,27 +80,32 @@ def reload_keys(listener, activation_key):
         listener.update_activation_keys()
 
 
-def send(backend, msg, vk, listener=None):
+def send(backend, msg, vk, listener=None, modifier=False):
     """Run the filter the fake keyboard Listener received; return (suppressed, return value)."""
     listener = listener or backend.keyboard_listener
     data = types.SimpleNamespace(vkCode=vk)
-    try:
-        return False, listener.kwargs['win32_event_filter'](msg, data)
-    except Suppressed:
-        return True, None
+    with mock.patch.object(key_listener, 'any_modifier_down', return_value=modifier):
+        try:
+            return False, listener.kwargs['win32_event_filter'](msg, data)
+        except Suppressed:
+            return True, None
+
+
+def recording(backend):
+    events = []
+    backend.on_input_event = events.append
+    return events
 
 
 class KeySwallowTests(unittest.TestCase):
-    def test_swallowed_key_down_is_dispatched_once_and_suppressed(self):
+    def test_pause_down_is_dispatched_once_and_suppressed(self):
         listener, backend = make_listener('pause')
-        events = []
-        backend.on_input_event = events.append
-        suppressed, _ = send(backend, WM_KEYDOWN, VK_PAUSE)
-        self.assertTrue(suppressed)
+        events = recording(backend)
+        self.assertTrue(send(backend, WM_KEYDOWN, VK_PAUSE)[0])
         self.assertEqual(events, [(KeyCode.PAUSE, InputEvent.KEY_PRESS)])
         self.assertEqual(backend.keyboard_listener.suppressed, 1)
 
-    def test_held_key_repeats_give_one_activate_and_one_deactivate(self):
+    def test_held_pause_gives_one_activate_and_one_deactivate(self):
         listener, backend = make_listener('pause')
         calls = []
         listener.add_callback('on_activate', lambda: calls.append('on'))
@@ -110,62 +118,82 @@ class KeySwallowTests(unittest.TestCase):
 
     def test_sys_key_messages_are_swallowed_too(self):
         listener, backend = make_listener('pause')
-        events = []
-        backend.on_input_event = events.append
+        events = recording(backend)
         self.assertTrue(send(backend, WM_SYSKEYDOWN, VK_PAUSE)[0])
         self.assertTrue(send(backend, WM_SYSKEYUP, VK_PAUSE)[0])
         self.assertEqual(events, [(KeyCode.PAUSE, InputEvent.KEY_PRESS), (KeyCode.PAUSE, InputEvent.KEY_RELEASE)])
 
+    def test_function_key_and_scroll_lock_are_swallowed(self):
+        for name, vk, code in (('f5', VK_F5, KeyCode.F5), ('scroll_lock', VK_SCROLL, KeyCode.SCROLL_LOCK)):
+            listener, backend = make_listener(name)
+            events = recording(backend)
+            self.assertTrue(send(backend, WM_KEYDOWN, vk)[0], name)
+            self.assertTrue(send(backend, WM_KEYUP, vk)[0], name)
+            self.assertEqual(events, [(code, InputEvent.KEY_PRESS), (code, InputEvent.KEY_RELEASE)])
+
+    def test_text_keys_are_never_swallowed(self):
+        for name, vk in (('a', VK_A), ('backquote', VK_OEM_3), ('space', VK_SPACE),
+                         ('enter', VK_ENTER), ('tab', VK_TAB)):
+            listener, backend = make_listener(name)
+            self.assertEqual(listener.get_swallow_keys(), frozenset(), name)
+            events = recording(backend)
+            for msg in (WM_KEYDOWN, WM_KEYUP):
+                suppressed, result = send(backend, msg, vk)
+                self.assertFalse(suppressed, name)
+                self.assertIsNot(result, False, name)
+            self.assertEqual(events, [], name)
+            self.assertEqual(backend.keyboard_listener.suppressed, 0, name)
+
     def test_other_keys_pass_through_untouched(self):
         listener, backend = make_listener('pause')
-        events = []
-        backend.on_input_event = events.append
+        events = recording(backend)
         for vk in (VK_A, VK_F5):
             suppressed, result = send(backend, WM_KEYDOWN, vk)
             self.assertFalse(suppressed)
             self.assertIsNot(result, False)
         self.assertEqual(events, [])
+
+    def test_modifier_held_at_first_down_passes_down_and_up_through(self):
+        listener, backend = make_listener('pause')
+        events = recording(backend)
+        suppressed, result = send(backend, WM_KEYDOWN, VK_PAUSE, modifier=True)
+        self.assertFalse(suppressed)
+        self.assertIsNot(result, False)
+        suppressed, result = send(backend, WM_KEYUP, VK_PAUSE, modifier=False)
+        self.assertFalse(suppressed)
+        self.assertIsNot(result, False)
+        self.assertEqual(events, [])
         self.assertEqual(backend.keyboard_listener.suppressed, 0)
 
-    def test_lone_character_key_is_swallowed(self):
-        for name, vk, code in (('backquote', VK_OEM_3, KeyCode.BACKQUOTE), ('a', VK_A, KeyCode.A)):
-            listener, backend = make_listener(name)
-            events = []
-            backend.on_input_event = events.append
-            self.assertTrue(send(backend, WM_KEYDOWN, vk)[0], name)
-            self.assertEqual(events, [(code, InputEvent.KEY_PRESS)])
-
-    def test_unresolvable_character_key_swallows_nothing(self):
-        listener, backend = make_listener('backquote', layout={})
-        self.assertEqual(listener.get_swallow_keys(), frozenset({KeyCode.BACKQUOTE}))
-        self.assertFalse(send(backend, WM_KEYDOWN, VK_OEM_3)[0])
-
-    def test_modifier_chord_swallows_nothing(self):
-        listener, backend = make_listener('ctrl+shift+space')
-        self.assertEqual(listener.get_swallow_keys(), frozenset())
-        self.assertFalse(send(backend, WM_KEYDOWN, VK_SPACE)[0])
-
-    def test_lone_modifier_chord_swallows_nothing(self):
-        listener, backend = make_listener('ctrl')
-        self.assertEqual(listener.get_swallow_keys(), frozenset())
-        self.assertFalse(send(backend, WM_KEYDOWN, VK_LCONTROL)[0])
-
-    def test_unknown_or_empty_token_swallows_nothing(self):
-        for chord in ('win+space', 'space+', 'garbage+pause'):
-            listener, backend = make_listener(chord)
-            self.assertEqual(listener.get_swallow_keys(), frozenset(), chord)
-            self.assertFalse(send(backend, WM_KEYDOWN, VK_SPACE)[0], chord)
-            self.assertFalse(send(backend, WM_KEYDOWN, VK_PAUSE)[0], chord)
-
-    def test_reloading_activation_keys_changes_what_is_swallowed(self):
+    def test_modifier_pressed_mid_hold_does_not_leak_the_rest(self):
         listener, backend = make_listener('pause')
-        reload_keys(listener, 'f5')
-        self.assertFalse(send(backend, WM_KEYDOWN, VK_PAUSE)[0])
-        self.assertTrue(send(backend, WM_KEYDOWN, VK_F5)[0])
-        reload_keys(listener, 'ctrl+f5')
-        self.assertFalse(send(backend, WM_KEYDOWN, VK_F5)[0])
-        reload_keys(listener, 'win+f5')
-        self.assertFalse(send(backend, WM_KEYDOWN, VK_F5)[0])
+        self.assertTrue(send(backend, WM_KEYDOWN, VK_PAUSE)[0])
+        for _ in range(5):
+            self.assertTrue(send(backend, WM_KEYDOWN, VK_PAUSE, modifier=True)[0])
+        self.assertTrue(send(backend, WM_KEYUP, VK_PAUSE, modifier=True)[0])
+        self.assertEqual(backend.keyboard_listener.suppressed, 7)
+
+    def test_orphan_key_up_passes_through(self):
+        listener, backend = make_listener('pause')
+        events = recording(backend)
+        suppressed, result = send(backend, WM_KEYUP, VK_PAUSE)
+        self.assertFalse(suppressed)
+        self.assertIsNot(result, False)
+        self.assertEqual(events, [])
+
+    def test_rearm_clears_swallowed_state(self):
+        listener, backend = make_listener('pause')
+        self.assertTrue(send(backend, WM_KEYDOWN, VK_PAUSE)[0])
+        backend.stop()
+        start_backend(backend)
+        self.assertFalse(send(backend, WM_KEYUP, VK_PAUSE)[0])
+
+    def test_modifier_check_raising_still_swallows(self):
+        listener, backend = make_listener('pause')
+        data = types.SimpleNamespace(vkCode=VK_PAUSE)
+        with mock.patch.object(key_listener, 'any_modifier_down', side_effect=OSError('no state')):
+            with self.assertRaises(Suppressed):
+                backend.keyboard_listener.kwargs['win32_event_filter'](WM_KEYDOWN, data)
 
     def test_a_raising_callback_still_suppresses_the_key(self):
         listener, backend = make_listener('pause')
@@ -173,17 +201,49 @@ class KeySwallowTests(unittest.TestCase):
         def boom():
             raise RuntimeError('callback failed')
         listener.add_callback('on_activate', boom)
-        suppressed, _ = send(backend, WM_KEYDOWN, VK_PAUSE)
-        self.assertTrue(suppressed)
+        self.assertTrue(send(backend, WM_KEYDOWN, VK_PAUSE)[0])
         self.assertEqual(backend.keyboard_listener.suppressed, 1)
+
+    def test_a_raising_print_still_suppresses_the_key(self):
+        listener, backend = make_listener('pause')
+
+        def boom(event):
+            raise RuntimeError('dispatch failed')
+        backend.on_input_event = boom
+        with mock.patch('builtins.print', side_effect=OSError('stdout gone')):
+            self.assertTrue(send(backend, WM_KEYDOWN, VK_PAUSE)[0])
+        self.assertEqual(backend.keyboard_listener.suppressed, 1)
+
+    def test_modifier_chords_swallow_nothing(self):
+        for chord, vk in (('ctrl+shift+space', VK_SPACE), ('ctrl', VK_LCONTROL), ('ctrl+pause', VK_PAUSE)):
+            listener, backend = make_listener(chord)
+            self.assertEqual(listener.get_swallow_keys(), frozenset(), chord)
+            self.assertFalse(send(backend, WM_KEYDOWN, vk)[0], chord)
+
+    def test_unknown_or_empty_token_swallows_nothing(self):
+        for chord in ('win+pause', 'pause+', 'garbage+f5'):
+            listener, backend = make_listener(chord)
+            self.assertEqual(listener.get_swallow_keys(), frozenset(), chord)
+            self.assertFalse(send(backend, WM_KEYDOWN, VK_PAUSE)[0], chord)
+            self.assertFalse(send(backend, WM_KEYDOWN, VK_F5)[0], chord)
+
+    def test_reloading_activation_keys_changes_what_is_swallowed(self):
+        listener, backend = make_listener('pause')
+        reload_keys(listener, 'f5')
+        self.assertFalse(send(backend, WM_KEYDOWN, VK_PAUSE)[0])
+        self.assertTrue(send(backend, WM_KEYDOWN, VK_F5)[0])
+        self.assertTrue(send(backend, WM_KEYUP, VK_F5)[0])
+        reload_keys(listener, 'ctrl+f5')
+        self.assertFalse(send(backend, WM_KEYDOWN, VK_F5)[0])
+        reload_keys(listener, 'win+f5')
+        self.assertFalse(send(backend, WM_KEYDOWN, VK_F5)[0])
 
     def test_late_event_after_stop_suppresses_via_its_own_listener(self):
         listener, backend = make_listener('pause')
         old = backend.keyboard_listener
         backend.stop()
         self.assertIsNone(backend.keyboard_listener)
-        suppressed, _ = send(backend, WM_KEYDOWN, VK_PAUSE, listener=old)
-        self.assertTrue(suppressed)
+        self.assertTrue(send(backend, WM_KEYDOWN, VK_PAUSE, listener=old)[0])
         self.assertEqual(old.suppressed, 1)
 
     def test_filter_only_passed_on_windows(self):
@@ -198,9 +258,10 @@ class KeySwallowTests(unittest.TestCase):
             self.assertEqual(set(backend.keyboard_listener.kwargs),
                              {'on_press', 'on_release', 'win32_event_filter'})
 
-    def test_resolver_is_none_off_windows(self):
+    def test_any_modifier_down_returns_bool(self):
+        self.assertIsInstance(key_listener.any_modifier_down(), bool)
         with mock.patch.object(key_listener.sys, 'platform', 'linux'):
-            self.assertIsNone(key_listener.resolve_char_vk('a'))
+            self.assertIs(key_listener.any_modifier_down(), False)
 
 
 if __name__ == '__main__':

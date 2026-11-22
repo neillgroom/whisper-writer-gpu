@@ -60,8 +60,13 @@ cause (it does not explain delete-while-holding, delete-only-when-the-line-has-t
 c3's Shift/clipboard hardening stands or falls on its own merits, not on this symptom.
 
 **Change (`src/key_listener.py` only - byte-identical in live and main, so c0 deploys without c1):**
-- `KeyListener` derives the keys to swallow from the activation chord: only when the chord is exactly one
-  non-modifier key. A chord with modifiers swallows nothing (unchanged behaviour).
+- `KeyListener` derives the keys to swallow from the activation chord: only a lone allowlisted non-text key
+  (Pause, Scroll Lock, F1-F20) pressed with no modifier held. Everything else swallows nothing (unchanged).
+  - Character keys (letters, digits, punctuation, space, enter, tab) are never swallowed: the app's own
+    typing goes through the same SendInput path, so swallowing them would eat dictated text and self-trigger.
+  - A press with Ctrl/Alt/Shift/Win already down passes through (down and up), so Alt+F4, Win+Pause etc.
+    keep working; repeats and the up of an already-swallowed press stay swallowed.
+  - An activation string with an unknown token (e.g. `win+space`) swallows nothing.
 - `PynputBackend.start` passes `win32_event_filter=` to `keyboard.Listener`. For a swallowed key the filter
   translates key-down/up to the existing `(KeyCode, InputEvent)` pair, calls `self.on_input_event(...)`
   directly, then `suppress_event()`. Direct dispatch is required: pynput 1.7.6 does not call

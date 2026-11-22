@@ -6,20 +6,17 @@ from typing import Callable, Set
 from utils import ConfigManager
 
 
-def resolve_char_vk(char: str):
-    """
-    Return the Windows virtual-key code that types `char` unshifted on the current layout, or None.
+_MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)  # VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN
 
-    Only win32; a character that needs Shift/Ctrl/Alt, or that the layout cannot type, is None, so
-    that key is simply not swallowable. Module-level so tests can patch it.
-    """
+
+def any_modifier_down() -> bool:
+    """True when Shift, Ctrl, Alt or Win is physically down (win32 only; False elsewhere)."""
     if sys.platform != 'win32':
-        return None
+        return False
     import ctypes
-    result = ctypes.windll.user32.VkKeyScanW(ctypes.c_wchar(char)) & 0xFFFF
-    if result == 0xFFFF or (result >> 8) != 0:
-        return None
-    return result & 0xFF
+    get_state = ctypes.windll.user32.GetAsyncKeyState
+    # GetAsyncKeyState returns a SHORT; truncate so only its own bits are tested.
+    return any(ctypes.c_short(get_state(vk)).value & 0x8000 for vk in _MODIFIER_VKS)
 
 
 class InputEvent(Enum):
@@ -215,6 +212,13 @@ class KeyCode(Enum):
     MOUSE_SIDE1 = auto()
     MOUSE_SIDE2 = auto()
     MOUSE_SIDE3 = auto()
+
+# The only activation keys that may be swallowed: keys that never produce text. InputSimulator
+# types characters (letters, digits, punctuation, space, enter, tab) through the same SendInput
+# path the hook sees, so swallowing a key typing can produce would eat the app's own dictated text
+# and self-trigger recording. (F21-F24 are left out: _create_key_map has no pynput entry for them.)
+SWALLOWABLE_KEYS = frozenset({KeyCode.PAUSE, KeyCode.SCROLL_LOCK} | {KeyCode[f'F{n}'] for n in range(1, 21)})
+
 
 class InputBackend(ABC):
     """
@@ -414,18 +418,14 @@ class KeyListener:
         """
         Keys the backend should consume instead of passing to the focused window.
 
-        Only a chord of exactly one non-modifier key is swallowed. Held, it auto-repeats, and every
-        repeat reaching the focused window does damage (Windows Terminal turns each Pause key-down
-        into Ctrl+Z). Modifier chords are left alone so the modifiers keep working everywhere.
+        Only a chord of exactly one key from SWALLOWABLE_KEYS is swallowed. Held, it auto-repeats,
+        and every repeat reaching the focused window does damage (Windows Terminal turns each Pause
+        key-down into Ctrl+Z). Every other chord swallows nothing, as before.
         """
-        modifiers = {
-            KeyCode.CTRL_LEFT, KeyCode.CTRL_RIGHT, KeyCode.SHIFT_LEFT, KeyCode.SHIFT_RIGHT,
-            KeyCode.ALT_LEFT, KeyCode.ALT_RIGHT, KeyCode.META_LEFT, KeyCode.META_RIGHT,
-        }
         if len(keys) != 1:
             return frozenset()
         key = next(iter(keys))
-        if isinstance(key, frozenset) or key in modifiers:
+        if key not in SWALLOWABLE_KEYS:
             return frozenset()
         return frozenset({key})
 
@@ -811,6 +811,7 @@ class PynputBackend(InputBackend):
         self.mouse = None
         self.key_map = None
         self.vk_map = {}
+        self.swallowed_down = set()  # vks whose key-down was swallowed and whose key-up is pending
 
     def get_swallow_keys(self) -> frozenset:
         """Keys to consume; replaced by the KeyListener with its own accessor."""
@@ -856,6 +857,7 @@ class PynputBackend(InputBackend):
 
     def stop(self):
         """Stop listening for keyboard and mouse events."""
+        self.swallowed_down.clear()
         if self.keyboard_listener:
             self.keyboard_listener.stop()
             self.keyboard_listener = None
@@ -880,33 +882,48 @@ class PynputBackend(InputBackend):
         pynput 1.7.6 does not call on_press/on_release for a suppressed event, so a swallowed key is
         dispatched to on_input_event here. Every other key returns True and passes through untouched.
         """
-        key_code = self.vk_map.get(data.vkCode)
-        if key_code is None or key_code not in self.get_swallow_keys():
+        vk = data.vkCode
+        key_code = self.vk_map.get(vk)
+        if key_code is None:
             return True
-        if msg in self._WIN32_KEY_DOWN:
-            event_type = InputEvent.KEY_PRESS
-        elif msg in self._WIN32_KEY_UP:
+        if msg in self._WIN32_KEY_UP:
+            # Only the up of a swallowed down is swallowed; never half a keystroke.
+            if vk not in self.swallowed_down:
+                return True
+            self.swallowed_down.discard(vk)
             event_type = InputEvent.KEY_RELEASE
+        elif msg in self._WIN32_KEY_DOWN:
+            # Auto-repeat of a swallowed key stays swallowed even if a modifier went down mid-hold.
+            if vk not in self.swallowed_down:
+                if key_code not in self.get_swallow_keys():
+                    return True
+                try:
+                    modified = any_modifier_down()
+                except Exception:
+                    modified = False  # unknown state: swallow; a leaked Ctrl+Z flood is the worse failure
+                if modified:
+                    return True  # Alt+F4, Win+Pause etc. pass through exactly as before
+                self.swallowed_down.add(vk)
+            event_type = InputEvent.KEY_PRESS
         else:
             return True
         try:
             self.on_input_event((key_code, event_type))
         except Exception as e:
-            # Our own dispatch failing must not let the key through (each leaked Pause repeat is a
-            # Ctrl+Z in the terminal) and must not escape into pynput, which stops the listener on
-            # any exception other than its suppress signal.
+            # Our own dispatch failing must not escape into pynput, which stops the listener on any
+            # exception other than its suppress signal.
             print(f"Error dispatching swallowed key {key_code}: {e}")
-        listener.suppress_event()
+        finally:
+            # Unconditional: neither a dispatch failure nor a failing print may leak the key (each
+            # leaked Pause repeat is a Ctrl+Z in the terminal). Raised here, after the except clause,
+            # so `except Exception` above never catches pynput's SuppressException.
+            listener.suppress_event()
 
     def _create_vk_map(self):
         """Reverse lookup from Windows virtual-key code to our KeyCode, derived from key_map."""
         vk_map = {}
         for pynput_key, key_code in self.key_map.items():
             vk = getattr(getattr(pynput_key, 'value', pynput_key), 'vk', None)
-            char = getattr(pynput_key, 'char', None)
-            if vk is None and char is not None:
-                # KeyCode.from_char(...) carries no vk; ask the active layout for it.
-                vk = resolve_char_vk(char)
             if vk is not None:
                 vk_map.setdefault(vk, key_code)
         return vk_map
