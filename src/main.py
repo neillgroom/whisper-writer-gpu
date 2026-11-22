@@ -198,6 +198,7 @@ class WhisperWriterApp(QObject):
         self.tray_icon.show()
 
     def cleanup(self):
+        self.closing = True  # no deferred continuous restart may start after this
         if self.wake_listener:
             if not self.wake_listener.stop():
                 # The process is exiting and the audio device would not let go even after
@@ -316,9 +317,40 @@ class WhisperWriterApp(QObject):
                 if not finishing.wait(2000):
                     ConfigManager.console_print('The finishing recording thread did not exit within 2 s; '
                                                 'continuous restart skipped.')
+                    self._restart_continuous_when_finished(finishing)
+                    return
             self.start_result_thread()
         else:
             self.key_listener.start()
+
+    def _restart_continuous_when_finished(self, finishing):
+        """
+        One-shot retry for a continuous restart skipped because the finishing thread
+        outlived the bounded wait: when it finally emits `finished`, start the next
+        recording, but only if nothing has changed since. A cancel is honoured:
+        the key in continuous mode, the status window's close and cleanup() all go
+        through stop_result_thread -> ResultThread.stop(), which clears the thread's
+        is_running; cleanup() also sets self.closing.
+        """
+        fired = []
+
+        def retry():
+            if fired:
+                return
+            fired.append(True)
+            try:
+                finishing.finished.disconnect(retry)
+            except (TypeError, RuntimeError):
+                pass
+            if (not getattr(self, 'closing', False)
+                    and getattr(finishing, 'is_running', False)  # False once stop() cancelled it
+                    and ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous'
+                    and self.result_thread is finishing and not finishing.isRunning()
+                    and not self.gate.busy()):
+                ConfigManager.console_print('The finishing recording thread has exited; restarting continuous recording.')
+                self.start_result_thread()
+
+        finishing.finished.connect(retry)
 
     def type_wake_transcript(self, result):
         """

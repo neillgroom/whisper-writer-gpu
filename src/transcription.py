@@ -234,19 +234,25 @@ def collapse_repeat(text):
     unchanged. Words are compared on their folded keys (punctuation stripped,
     casefolded), so a copy with different punctuation still matches and a lone
     "-" or "..." never counts as a word. The kept text is sliced from the raw
-    string at the end of copy 1's last word, so its punctuation and
-    capitalization are kept verbatim.
+    string, so its punctuation and capitalization are kept verbatim. Copy 1 ends
+    after its last word plus any punctuation-only tokens ("?", "...") standing
+    between it and copy 2's first word; punctuation after the last copy goes
+    with the dropped copies.
     """
-    keyed = []  # (folded word, raw token match) for every token that has a word in it
-    for token in re.finditer(r'\S+', text):
+    tokens = list(re.finditer(r'\S+', text))
+    keyed = []  # (folded word, index into tokens) for every token that has a word in it
+    for i, token in enumerate(tokens):
         key = _phrase_key(token.group())
         if key:  # a token has no whitespace, so it folds to zero or one word
-            keyed.append((key[0], token))
+            keyed.append((key[0], i))
     words = [w for w, _ in keyed]
     n = len(words)
     for size in range(MIN_COLLAPSE_UNIT_WORDS, n // 2 + 1):
         if n % size == 0 and words == words[:size] * (n // size):
-            return text[:keyed[size - 1][1].end()].strip()
+            # Tokens between copy 1's last word and copy 2's first word carry no
+            # word, so they are copy 1's trailing punctuation.
+            last = keyed[size][1] - 1
+            return text[:tokens[last].end()].strip()
     return text
 
 

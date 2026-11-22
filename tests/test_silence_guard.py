@@ -61,6 +61,20 @@ class CollapseTests(unittest.TestCase):
         self.assertEqual(self.pp("I don't know. I don't know."), "I don't know. I don't know. ")
         self.assertEqual(self.reports, [])
 
+    def test_separate_punctuation_ending_copy_one_is_kept(self):
+        self.assertEqual(collapse_repeat('Is this feature ready ? Is this feature ready ?'), 'Is this feature ready ?')
+        self.assertEqual(collapse_repeat('A b c d ... A b c d ...'), 'A b c d ...')
+        self.assertEqual(collapse_repeat('A b c d ... ! A b c d'), 'A b c d ... !')
+        # Attached punctuation behaves as before.
+        self.assertEqual(collapse_repeat('Is this feature ready? Is this feature ready?'), 'Is this feature ready?')
+        self.assertEqual(collapse_repeat(DOUBLED), 'Testing, one, two, three.')
+
+    def test_punctuation_before_the_first_or_after_the_last_copy_never_breaks_detection(self):
+        self.assertEqual(collapse_repeat('... A b c d A b c d'), '... A b c d')
+        self.assertEqual(collapse_repeat('A b c d A b c d ... ?'), 'A b c d')
+        self.assertEqual(collapse_repeat('- A b c d . A b c d . A b c d - -'), '- A b c d .')
+        self.assertEqual(collapse_repeat('A b c d ... A b c e ...'), 'A b c d ... A b c e ...')  # not a repeat
+
     def test_dash_and_ellipsis_never_count_as_words(self):
         self.assertEqual(self.pp('Wait - one second. Wait - one second.'), 'Wait - one second. Wait - one second. ')
         self.assertEqual(collapse_repeat('Wait ... one second. Wait ... one second.'),
@@ -345,8 +359,19 @@ class RunTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp, 'history.log')))
 
     def test_the_worktree_root_is_untouched(self):
+        # The checkout may also be a live install with real saves in it: compare, never create or delete.
+        def snapshot():
+            real = os.path.join(REPO, 'doubled-audio')
+            history = os.path.join(REPO, 'history.log')
+            files = None
+            if os.path.isdir(real):
+                files = sorted((f, os.stat(os.path.join(real, f)).st_size, os.stat(os.path.join(real, f)).st_mtime_ns)
+                               for f in os.listdir(real))
+            hist = (os.stat(history).st_size, os.stat(history).st_mtime_ns) if os.path.exists(history) else None
+            return os.path.exists(real), files, hist
+        before = snapshot()
         self.run_thread(DOUBLED)
-        self.assertFalse(os.path.exists(os.path.join(REPO, 'doubled-audio')))
+        self.assertEqual(snapshot(), before)
 
 
 class CompletionGateTests(unittest.TestCase):
@@ -358,6 +383,8 @@ class CompletionGateTests(unittest.TestCase):
         app.input_simulator = SimpleNamespace(typewrite=lambda text, **kw: app.typed.append(text) or '')
         app.start_result_thread = lambda *a, **kw: app.started.append('key')
         app.type_wake_transcript = lambda text: app.typed.append(('wake', text))
+        app._restart_continuous_when_finished = \
+            lambda t: main.WhisperWriterApp._restart_continuous_when_finished(app, t)
         return app
 
     def setUp(self):
@@ -435,6 +462,112 @@ class CompletionGateTests(unittest.TestCase):
         stuck.wait.assert_called_once_with(2000)
         rt.assert_not_called()
         self.assertTrue(any('continuous restart skipped' in c.args[0] for c in cp.call_args_list))
+
+    # --- one-shot retry after a timed-out wait ---
+
+    class FakeSignal:
+        def __init__(self, disconnect_works=True):
+            self.slots = []
+            self.disconnect_works = disconnect_works
+
+        def connect(self, slot):
+            self.slots.append(slot)
+
+        def disconnect(self, slot):
+            if not self.disconnect_works:
+                raise TypeError('disconnect failed')
+            self.slots.remove(slot)
+
+        def emit(self):
+            for slot in list(self.slots):
+                slot()
+
+    class StuckThread:
+        source = 'key'
+
+        def __init__(self, signal):
+            self.finished = signal
+            self.running = True
+            self.is_running = True  # ResultThread's own flag; stop() clears it
+
+        def isRunning(self):
+            return self.running
+
+        def wait(self, ms):
+            return False
+
+        def end(self):
+            self.running = False
+            self.finished.emit()
+
+    def stuck_app(self, disconnect_works=True):
+        from wake_gate import WakeGate
+        cfg(self, 'continuous', 'recording_options', 'recording_mode')
+        cfg(self, True, 'misc', 'hide_status_window')
+        app = self.make_app('key')
+        stuck = self.StuckThread(self.FakeSignal(disconnect_works))
+        app.sender = lambda: stuck
+        app.result_thread = stuck
+        app.local_model = None
+        app.gate = WakeGate()  # free: on_result_finished has already released it
+        app.on_transcription_complete = lambda r: None
+        app.on_result_finished = lambda: None
+        app._restart_continuous_when_finished = \
+            lambda t: main.WhisperWriterApp._restart_continuous_when_finished(app, t)
+        app.start_result_thread = lambda *a, **kw: main.WhisperWriterApp.start_result_thread(app, *a, **kw)
+        self.created = []
+        p = mock.patch.object(main, 'ResultThread',
+                              lambda model, source='key', device=None: self.created.append(mock.Mock(source=source))
+                              or self.created[-1])
+        p.start()
+        self.addCleanup(p.stop)
+        self.complete(app, ' ')
+        self.assertEqual(self.created, [])  # nothing started while the old thread is stuck
+        return app, stuck
+
+    def test_a_timed_out_wait_restarts_once_when_the_thread_finally_finishes(self):
+        app, stuck = self.stuck_app()
+        stuck.end()
+        self.assertEqual(len(self.created), 1)
+        self.created[0].start.assert_called_once()
+        self.assertEqual(stuck.finished.slots, [])  # the handler disconnected itself
+
+    def test_finished_firing_twice_still_restarts_once(self):
+        app, stuck = self.stuck_app(disconnect_works=False)  # only the fired flag stops a second run
+        stuck.end()
+        app.result_thread = stuck  # even if the state looks eligible again
+        stuck.finished.emit()
+        self.assertEqual(len(self.created), 1)
+
+    def test_no_retry_after_the_mode_changes(self):
+        app, stuck = self.stuck_app()
+        set_config('hold_to_record', 'recording_options', 'recording_mode')
+        stuck.end()
+        self.assertEqual(self.created, [])
+
+    def test_no_retry_when_another_thread_is_running(self):
+        app, stuck = self.stuck_app()
+        app.result_thread = mock.Mock(isRunning=mock.Mock(return_value=True))
+        stuck.end()
+        self.assertEqual(self.created, [])
+
+    def test_no_retry_after_a_cancel(self):
+        app, stuck = self.stuck_app()
+        stuck.is_running = False  # what ResultThread.stop() does on the key / close / cleanup
+        stuck.end()
+        self.assertEqual(self.created, [])
+
+    def test_no_retry_after_cleanup(self):
+        app, stuck = self.stuck_app()
+        app.closing = True
+        stuck.end()
+        self.assertEqual(self.created, [])
+
+    def test_no_retry_while_the_gate_is_busy(self):
+        app, stuck = self.stuck_app()
+        app.gate.begin('wake', object())
+        stuck.end()
+        self.assertEqual(self.created, [])
 
     def test_without_the_wait_the_restart_would_be_skipped(self):
         # Guards the test above: the real start_result_thread does refuse while the old thread runs.
