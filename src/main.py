@@ -295,13 +295,16 @@ class WhisperWriterApp(QObject):
         When the transcription is complete, type the result and start listening for the activation key again.
         """
         source = getattr(self.sender(), 'source', 'key')
-        if source == 'wake':
-            self.type_wake_transcript(result)
-        else:
-            self.input_simulator.typewrite(result)
+        # A blank result (silence, a dropped hallucination) types and beeps nothing,
+        # but the re-arm below always runs so the key never goes dead.
+        if result.strip():
+            if source == 'wake':
+                self.type_wake_transcript(result)
+            else:
+                self.input_simulator.typewrite(result)
 
-        if ConfigManager.get_config_value('misc', 'noise_on_completion'):
-            AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)
+            if ConfigManager.get_config_value('misc', 'noise_on_completion'):
+                AudioPlayer(os.path.join('assets', 'beep.wav')).play(block=True)
 
         # Only a key recording re-arms continuous mode; a wake recording is always one-shot.
         if source == 'key' and ConfigManager.get_config_value('recording_options', 'recording_mode') == 'continuous':
