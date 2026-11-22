@@ -68,7 +68,11 @@ class ExtraSettingsTests(unittest.TestCase):
         self.assertIsNone(extra_settings(None))
 
     def test_wasapi_index_gets_auto_convert(self):
-        self.assertIsInstance(extra_settings(2), sd.WasapiSettings)
+        settings = extra_settings(2)
+        self.assertIsInstance(settings, sd.WasapiSettings)
+        # sounddevice keeps no public attribute; auto_convert sets paWinWasapiAutoConvert (64).
+        self.assertTrue(settings._streaminfo.flags & 64)
+        self.assertFalse(sd.WasapiSettings()._streaminfo.flags & 64)  # the check can fail
 
     def test_non_wasapi_index_gets_nothing(self):
         self.assertIsNone(extra_settings(0))  # MME
@@ -86,6 +90,49 @@ class ExtraSettingsTests(unittest.TestCase):
             self.assertIsNone(extra_settings(2))
         with mock.patch.object(audio_devices.sd, 'query_hostapis', side_effect=OSError('backend')):
             self.assertIsNone(extra_settings(2))
+
+
+class ComTests(unittest.TestCase):
+    def fake_ole(self, hr):
+        ole = mock.Mock()
+        ole.CoInitializeEx.return_value = hr
+        fake_ctypes = mock.Mock()
+        fake_ctypes.windll.ole32 = ole
+        patcher = mock.patch.object(audio_devices, 'ctypes', fake_ctypes)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return ole
+
+    def test_windows_inits_multithreaded_and_releases_when_held(self):
+        ole = self.fake_ole(0)
+        with mock.patch.object(audio_devices.sys, 'platform', 'win32'):
+            held = audio_devices.com_initialize()
+            audio_devices.com_uninitialize(held)
+        ole.CoInitializeEx.assert_called_once_with(None, 0)
+        self.assertTrue(held)
+        ole.CoUninitialize.assert_called_once_with()
+
+    def test_already_initialized_still_needs_release(self):
+        self.fake_ole(1)
+        with mock.patch.object(audio_devices.sys, 'platform', 'win32'):
+            self.assertTrue(audio_devices.com_initialize())
+
+    def test_changed_mode_is_not_released(self):
+        ole = self.fake_ole(-2147417850)  # RPC_E_CHANGED_MODE
+        with mock.patch.object(audio_devices.sys, 'platform', 'win32'):
+            held = audio_devices.com_initialize()
+            audio_devices.com_uninitialize(held)
+        self.assertFalse(held)
+        ole.CoUninitialize.assert_not_called()
+
+    def test_non_windows_calls_neither(self):
+        ole = self.fake_ole(0)
+        with mock.patch.object(audio_devices.sys, 'platform', 'linux'):
+            held = audio_devices.com_initialize()
+            audio_devices.com_uninitialize(held)
+        self.assertFalse(held)
+        ole.CoInitializeEx.assert_not_called()
+        ole.CoUninitialize.assert_not_called()
 
 
 if __name__ == '__main__':

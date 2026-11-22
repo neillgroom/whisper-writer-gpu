@@ -1,8 +1,10 @@
+import ctypes
 import subprocess
 import os
 import signal
+import sys
 import time
-from pynput.keyboard import Controller as PynputController
+from pynput.keyboard import Controller as PynputController, Key, KeyCode
 
 from utils import ConfigManager
 
@@ -19,6 +21,33 @@ def run_command_or_exit_on_failure(command):
         print(f"Error running command: {e}")
         exit(1)
 
+
+# Bound once at import. A private WinDLL instance so setting argtypes/restype does not
+# mutate the shared windll.user32 object other code uses.
+_vk_key_scan = None
+if sys.platform == 'win32':
+    _vk_key_scan = ctypes.WinDLL('user32').VkKeyScanW
+    _vk_key_scan.argtypes = [ctypes.c_wchar]
+    _vk_key_scan.restype = ctypes.c_short
+
+SHIFT_ONLY = 1  # VkKeyScanW modifier byte: Shift and nothing else
+
+
+def layout_key(char):
+    """
+    Ask the active keyboard layout how to type `char`: returns (vk, modifiers)
+    where modifiers is the VkKeyScanW high byte (1 Shift, 2 Ctrl, 4 Alt), or
+    None when the layout has no key for it, the char is not a single UTF-16
+    unit, or the platform is not Windows.
+    """
+    if _vk_key_scan is None or len(char) != 1 or ord(char) > 0xFFFF:
+        return None
+    result = _vk_key_scan(char)
+    if result == -1:  # 0xFFFF as a signed short: no key on this layout
+        return None
+    return result & 0xFF, (result >> 8) & 0xFF
+
+
 class InputSimulator:
     """
     A class to simulate keyboard input using various methods.
@@ -32,9 +61,6 @@ class InputSimulator:
         self.dotool_process = None
 
         if self.input_method == 'pynput':
-            self.keyboard = PynputController()
-        elif self.input_method == 'paste':
-            # Paste delivery still needs a controller for the Ctrl+V keystroke.
             self.keyboard = PynputController()
         elif self.input_method == 'dotool':
             self._initialize_dotool()
@@ -69,8 +95,6 @@ class InputSimulator:
         interval = ConfigManager.get_config_value('post_processing', 'writing_key_press_delay')
         if self.input_method == 'pynput':
             return self._typewrite_pynput(text, interval, should_continue)
-        if self.input_method == 'paste':
-            return self._typewrite_paste(text, should_continue)
         # ydotool/dotool type the whole string in one call, so the check can only run once.
         if should_continue is not None and not should_continue():
             return text
@@ -84,10 +108,21 @@ class InputSimulator:
         """
         Simulate typing using pynput.
 
-        Capitals and other Shift-requiring characters are sent as a real
-        Shift+key press. pynput's default path sends them as VK_PACKET Unicode
-        events, which terminals and TUIs frequently drop -- the missing-initial-
-        capital "esting" gibberish. Real VK events work everywhere.
+        Empty text returns at once. should_continue() is checked before anything
+        is sent -- including the defensive Shift release -- and again before
+        every character; at the first False the untyped remainder is returned.
+
+        Then Key.shift, Key.shift_l and Key.shift_r are released: a Shift latched
+        by an interrupted earlier pass would turn the next keystrokes into
+        selection-extension and replace text. Releasing an unpressed key is a no-op.
+
+        Each character is looked up in the active layout (layout_key). When the
+        layout types it with Shift alone (capitals, '?', '!', ':' on US), a real
+        Shift down + the layout's virtual key + Shift up is sent: pynput's default
+        sends those as VK_PACKET Unicode events, which terminals and TUIs often
+        drop. Anything else -- no modifier, a Ctrl/Alt (AltGr) combination, no key
+        on the layout, or not Windows -- is pressed as the original character,
+        as upstream did.
 
         Args:
             text (str): The text to type.
@@ -97,75 +132,26 @@ class InputSimulator:
         Returns:
             str: The untyped remainder.
         """
-        from pynput.keyboard import Key
-        shift = Key.shift
-        # Defensive: if a previous typing pass was interrupted mid-capital, its
-        # Shift press may still be latched. A stuck Shift turns every later
-        # keystroke into selection-extension, so the next text REPLACES the
-        # selection instead of inserting -- "it deletes my text". Releasing an
-        # unpressed key is a no-op, so this is always safe.
-        self.keyboard.release(shift)
+        if not text:
+            return ''
+        if should_continue is not None and not should_continue():
+            return text
+        for shift in (Key.shift, Key.shift_l, Key.shift_r):
+            self.keyboard.release(shift)
         for index, char in enumerate(text):
-            if should_continue is not None and not should_continue():
+            if index and should_continue is not None and not should_continue():
                 return text[index:]
-            if char.isupper():
-                # pressed() guarantees the Shift release even if the press of
-                # the character raises, so a latch can never survive an error.
-                with self.keyboard.pressed(shift):
-                    self.keyboard.press(char.lower())
-                    self.keyboard.release(char.lower())
+            mapped = layout_key(char)
+            if mapped is not None and mapped[1] == SHIFT_ONLY:
+                key = KeyCode.from_vk(mapped[0])
+                # pressed() guarantees the Shift release even if the press raises.
+                with self.keyboard.pressed(Key.shift):
+                    self.keyboard.press(key)
+                    self.keyboard.release(key)
             else:
                 self.keyboard.press(char)
                 self.keyboard.release(char)
             time.sleep(interval)
-        return ''
-
-    def _typewrite_paste(self, text, should_continue=None):
-        """
-        Deliver `text` as one clipboard paste: copy, Ctrl+V.
-
-        The previous clipboard contents are NOT restored on a timer: a slow or
-        busy target processes the injected Ctrl+V late, and a mid-flight restore
-        would make it paste the OLD clipboard instead of the transcript. Instead,
-        whatever we borrowed is given back at the START of the next paste, when
-        nothing is waiting to read it.
-
-        Per-key injection drops characters on some targets -- pynput sends every
-        Shift-requiring character (capitals, punctuation) as a VK_PACKET Unicode
-        event, which terminals and TUIs often mishandle -- so the whole line
-        arrives as a single paste instead.
-        """
-        import pyperclip
-        from pynput.keyboard import Key
-
-        if should_continue is not None and not should_continue():
-            return text
-        backup = getattr(self, '_paste_backup', None)
-        if backup is not None:
-            try:
-                pyperclip.copy(backup)
-            except Exception:
-                pass
-            self._paste_backup = None
-        try:
-            previous = pyperclip.paste()
-        except Exception:
-            previous = None
-        pyperclip.copy(text)
-        # A clipboard locked by another process can swallow the write; verify
-        # the read-back matches before pasting, retry briefly, else give up
-        # with the remainder rather than paste stale content.
-        for _ in range(4):
-            if pyperclip.paste() == text:
-                break
-            time.sleep(0.05)
-            pyperclip.copy(text)
-        else:
-            return text
-        self._paste_backup = previous
-        with self.keyboard.pressed(Key.ctrl):
-            self.keyboard.press('v')
-            self.keyboard.release('v')
         return ''
 
     def _typewrite_ydotool(self, text, interval):

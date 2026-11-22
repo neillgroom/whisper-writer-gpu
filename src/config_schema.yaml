@@ -54,6 +54,7 @@ model_options:
         - large-v1
         - large-v2
         - large-v3
+        - large-v3-turbo
     device:
       value: auto
       type: str
@@ -177,10 +178,9 @@ post_processing:
   input_method:
     value: pynput
     type: str
-    description: "The method to use for simulating keyboard input. 'paste' delivers the transcript as a single clipboard paste (recommended on Windows: per-key injection drops capitals in terminals)."
+    description: "The method to use for simulating keyboard input."
     options:
       - pynput
-      - paste
       - ydotool
       - dotool
 

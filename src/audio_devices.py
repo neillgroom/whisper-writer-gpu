@@ -10,6 +10,9 @@ resolve_input never raises: a backend that cannot be queried returns None, the
 same as a disconnected mic, so the always-on listener and the wake callback can
 treat it as "no mic right now" and retry rather than die.
 """
+import ctypes
+import sys
+
 import sounddevice as sd
 
 from utils import ConfigManager
@@ -73,3 +76,26 @@ def extra_settings(device):
     except Exception as error:
         ConfigManager.console_print(f'Host API lookup for device {device} failed: {error}')
         return None
+
+
+def com_initialize():
+    """
+    Initialize COM (multithreaded) on the calling worker thread, the way
+    WakeListener does: a Qt app leaves the main thread's apartment in STA, and a
+    worker that opens a WASAPI stream without its own COM init fails with
+    PortAudio -9999. Returns True when the caller holds a reference that
+    com_uninitialize() must release. Non-Windows: False, nothing called.
+    """
+    if sys.platform != 'win32':
+        return False
+    COINIT_MULTITHREADED = 0x0
+    hr = ctypes.windll.ole32.CoInitializeEx(None, COINIT_MULTITHREADED)
+    # S_OK (0) and S_FALSE (1, already initialized here) both need a CoUninitialize;
+    # RPC_E_CHANGED_MODE (negative) means another apartment owns this thread -- do not.
+    return hr in (0, 1)
+
+
+def com_uninitialize(held):
+    """Release the reference com_initialize() returned True for."""
+    if held:
+        ctypes.windll.ole32.CoUninitialize()
