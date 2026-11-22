@@ -184,7 +184,7 @@ Ordering is load-bearing (plan-board-1 P1):
    file the deploy overwrites lives under `src\`; verified live: no root-level `main.py`) to a timestamped
    backup (`...\whisper-writer-wake\bak-<date>-src\`). Rollback = restore the backup and restart.
 2. Copy CODE files only: `input_simulation.py`, `transcription.py`, `result_thread.py`, `audio_devices.py`,
-   `main.py`, `config_schema.yaml`, `wake_setup.py`, `ui/settings_window.py`. **Never copy `config.yaml`** —
+   `main.py`, `key_listener.py`, `config_schema.yaml`, `wake_setup.py`, `ui/settings_window.py`. **Never copy `config.yaml`** —
    live keeps `sound_device: 15` and `wake_options.enabled: true`. (`main.py` is required: c2's
    `on_transcription_complete` gate lives there; without it the install still types the lone space.)
 3. Restart the app (one clean chain). Rollback = restore the snapshot and restart.

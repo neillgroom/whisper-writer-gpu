@@ -6,6 +6,22 @@ from typing import Callable, Set
 from utils import ConfigManager
 
 
+def resolve_char_vk(char: str):
+    """
+    Return the Windows virtual-key code that types `char` unshifted on the current layout, or None.
+
+    Only win32; a character that needs Shift/Ctrl/Alt, or that the layout cannot type, is None, so
+    that key is simply not swallowable. Module-level so tests can patch it.
+    """
+    if sys.platform != 'win32':
+        return None
+    import ctypes
+    result = ctypes.windll.user32.VkKeyScanW(ctypes.c_wchar(char)) & 0xFFFF
+    if result == 0xFFFF or (result >> 8) != 0:
+        return None
+    return result & 0xFF
+
+
 class InputEvent(Enum):
     KEY_PRESS = auto()
     KEY_RELEASE = auto()
@@ -357,8 +373,13 @@ class KeyListener:
     def load_activation_keys(self):
         """Load activation keys from configuration."""
         key_combination = ConfigManager.get_config_value('recording_options', 'activation_key')
+        self._has_unknown_token = False
         keys = self.parse_key_combination(key_combination)
         self.set_activation_keys(keys)
+        # parse_key_combination drops unknown or empty tokens ('win+space' -> {SPACE}); never
+        # swallow a key the user did not actually configure on its own.
+        if self._has_unknown_token:
+            self.swallow_keys = frozenset()
 
     def parse_key_combination(self, combination_string: str) -> Set[KeyCode | frozenset[KeyCode]]:
         """Parse a string representation of key combination into a set of KeyCodes."""
@@ -379,6 +400,7 @@ class KeyListener:
                     keycode = KeyCode[key]
                     keys.add(keycode)
                 except KeyError:
+                    self._has_unknown_token = True
                     print(f"Unknown key: {key}")
         return keys
 
@@ -810,11 +832,17 @@ class PynputBackend(InputBackend):
             self.vk_map = self._create_vk_map()
 
         if sys.platform == 'win32':
-            self.keyboard_listener = self.keyboard.Listener(
+            # The filter suppresses through its own listener, never self.keyboard_listener, which
+            # stop() may null from another thread mid-event. The holder is filled before start(),
+            # and the hook (the only caller of the filter) is installed only once start() runs.
+            holder = []
+            listener = self.keyboard.Listener(
                 on_press=self._on_keyboard_press,
                 on_release=self._on_keyboard_release,
-                win32_event_filter=self._win32_event_filter
+                win32_event_filter=lambda msg, data: self._win32_event_filter(msg, data, holder[0])
             )
+            holder.append(listener)
+            self.keyboard_listener = listener
         else:
             self.keyboard_listener = self.keyboard.Listener(
                 on_press=self._on_keyboard_press,
@@ -845,7 +873,7 @@ class PynputBackend(InputBackend):
     _WIN32_KEY_DOWN = (0x0100, 0x0104)  # WM_KEYDOWN, WM_SYSKEYDOWN
     _WIN32_KEY_UP = (0x0101, 0x0105)  # WM_KEYUP, WM_SYSKEYUP
 
-    def _win32_event_filter(self, msg, data):
+    def _win32_event_filter(self, msg, data, listener):
         """
         pynput win32 event filter: consume the activation key so it never reaches the focused window.
 
@@ -868,13 +896,17 @@ class PynputBackend(InputBackend):
             # Ctrl+Z in the terminal) and must not escape into pynput, which stops the listener on
             # any exception other than its suppress signal.
             print(f"Error dispatching swallowed key {key_code}: {e}")
-        self.keyboard_listener.suppress_event()
+        listener.suppress_event()
 
     def _create_vk_map(self):
         """Reverse lookup from Windows virtual-key code to our KeyCode, derived from key_map."""
         vk_map = {}
         for pynput_key, key_code in self.key_map.items():
             vk = getattr(getattr(pynput_key, 'value', pynput_key), 'vk', None)
+            char = getattr(pynput_key, 'char', None)
+            if vk is None and char is not None:
+                # KeyCode.from_char(...) carries no vk; ask the active layout for it.
+                vk = resolve_char_vk(char)
             if vk is not None:
                 vk_map.setdefault(vk, key_code)
         return vk_map
