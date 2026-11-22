@@ -80,15 +80,37 @@ def reload_keys(listener, activation_key):
         listener.update_activation_keys()
 
 
+CHAR_VKS = {VK_A: 'a', VK_OEM_3: '`'}
+
+
+def pynput_key_for(vk):
+    """The key real pynput would hand on_press/on_release for this vk (reverse of vk_map's source)."""
+    if vk in CHAR_VKS:
+        return real_keyboard.KeyCode.from_char(CHAR_VKS[vk])
+    for key in real_keyboard.Key:
+        if getattr(key.value, 'vk', None) == vk:
+            return key
+    return real_keyboard.KeyCode.from_vk(vk)
+
+
 def send(backend, msg, vk, listener=None, modifier=False):
-    """Run the filter the fake keyboard Listener received; return (suppressed, return value)."""
+    """
+    Behave like pynput: run the filter; if it suppresses, stop. Otherwise (non-False return) forward
+    the key to on_press/on_release. Returns (suppressed, filter return value); counts forwards on
+    backend.forwarded so tests can tell the normal path from the filter's direct dispatch.
+    """
     listener = listener or backend.keyboard_listener
     data = types.SimpleNamespace(vkCode=vk)
     with mock.patch.object(key_listener, 'any_modifier_down', return_value=modifier):
         try:
-            return False, listener.kwargs['win32_event_filter'](msg, data)
+            result = listener.kwargs['win32_event_filter'](msg, data)
         except Suppressed:
             return True, None
+    if result is not False:
+        handler = 'on_press' if msg in (WM_KEYDOWN, WM_SYSKEYDOWN) else 'on_release'
+        backend.forwarded = getattr(backend, 'forwarded', 0) + 1
+        listener.kwargs[handler](pynput_key_for(vk))
+    return False, result
 
 
 def recording(backend):
@@ -134,6 +156,7 @@ class KeySwallowTests(unittest.TestCase):
     def test_text_keys_are_never_swallowed(self):
         for name, vk in (('a', VK_A), ('backquote', VK_OEM_3), ('space', VK_SPACE),
                          ('enter', VK_ENTER), ('tab', VK_TAB)):
+            code = KeyCode[name.upper()]
             listener, backend = make_listener(name)
             self.assertEqual(listener.get_swallow_keys(), frozenset(), name)
             events = recording(backend)
@@ -141,7 +164,9 @@ class KeySwallowTests(unittest.TestCase):
                 suppressed, result = send(backend, msg, vk)
                 self.assertFalse(suppressed, name)
                 self.assertIsNot(result, False, name)
-            self.assertEqual(events, [], name)
+            # Reaches the normal pynput path, once per event: the filter did not direct-dispatch.
+            self.assertEqual(backend.forwarded, 2, name)
+            self.assertEqual(events, [(code, InputEvent.KEY_PRESS), (code, InputEvent.KEY_RELEASE)], name)
             self.assertEqual(backend.keyboard_listener.suppressed, 0, name)
 
     def test_other_keys_pass_through_untouched(self):
@@ -151,19 +176,29 @@ class KeySwallowTests(unittest.TestCase):
             suppressed, result = send(backend, WM_KEYDOWN, vk)
             self.assertFalse(suppressed)
             self.assertIsNot(result, False)
-        self.assertEqual(events, [])
+        self.assertEqual(backend.forwarded, 2)
+        self.assertEqual(events, [(KeyCode.A, InputEvent.KEY_PRESS), (KeyCode.F5, InputEvent.KEY_PRESS)])
 
     def test_modifier_held_at_first_down_passes_down_and_up_through(self):
         listener, backend = make_listener('pause')
-        events = recording(backend)
+        calls = []
+        listener.add_callback('on_activate', lambda: calls.append('on'))
+        listener.add_callback('on_deactivate', lambda: calls.append('off'))
+        dispatched = []
+        real_dispatch = backend.on_input_event
+        backend.on_input_event = lambda event: (dispatched.append(event), real_dispatch(event))
         suppressed, result = send(backend, WM_KEYDOWN, VK_PAUSE, modifier=True)
         self.assertFalse(suppressed)
         self.assertIsNot(result, False)
         suppressed, result = send(backend, WM_KEYUP, VK_PAUSE, modifier=False)
         self.assertFalse(suppressed)
         self.assertIsNot(result, False)
-        self.assertEqual(events, [])
         self.assertEqual(backend.keyboard_listener.suppressed, 0)
+        # Exactly one dispatch per event, both via the normal pynput path (no filter direct-dispatch).
+        self.assertEqual(backend.forwarded, 2)
+        self.assertEqual(dispatched, [(KeyCode.PAUSE, InputEvent.KEY_PRESS), (KeyCode.PAUSE, InputEvent.KEY_RELEASE)])
+        # Pre-existing behaviour, deliberately kept: a stuck modifier must never make dictation dead.
+        self.assertEqual(calls, ['on', 'off'])
 
     def test_modifier_pressed_mid_hold_does_not_leak_the_rest(self):
         listener, backend = make_listener('pause')
@@ -179,7 +214,8 @@ class KeySwallowTests(unittest.TestCase):
         suppressed, result = send(backend, WM_KEYUP, VK_PAUSE)
         self.assertFalse(suppressed)
         self.assertIsNot(result, False)
-        self.assertEqual(events, [])
+        self.assertEqual(backend.forwarded, 1)
+        self.assertEqual(events, [(KeyCode.PAUSE, InputEvent.KEY_RELEASE)])
 
     def test_rearm_clears_swallowed_state(self):
         listener, backend = make_listener('pause')

@@ -8,15 +8,21 @@ from utils import ConfigManager
 
 _MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)  # VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN
 
+# Bound once at import, not inside the hook callback. A private WinDLL instance so setting
+# argtypes/restype does not mutate the shared windll.user32 object other code uses.
+_get_async_key_state = None
+if sys.platform == 'win32':
+    import ctypes
+    _get_async_key_state = ctypes.WinDLL('user32').GetAsyncKeyState
+    _get_async_key_state.argtypes = [ctypes.c_int]
+    _get_async_key_state.restype = ctypes.c_short
+
 
 def any_modifier_down() -> bool:
     """True when Shift, Ctrl, Alt or Win is physically down (win32 only; False elsewhere)."""
-    if sys.platform != 'win32':
+    if sys.platform != 'win32' or _get_async_key_state is None:
         return False
-    import ctypes
-    get_state = ctypes.windll.user32.GetAsyncKeyState
-    # GetAsyncKeyState returns a SHORT; truncate so only its own bits are tested.
-    return any(ctypes.c_short(get_state(vk)).value & 0x8000 for vk in _MODIFIER_VKS)
+    return any(_get_async_key_state(vk) & 0x8000 for vk in _MODIFIER_VKS)
 
 
 class InputEvent(Enum):
