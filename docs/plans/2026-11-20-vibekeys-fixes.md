@@ -88,6 +88,11 @@ Make the repo tree match the running install (and carry the newer repo code in t
 - Port verbatim from live: `src/input_simulation.py`, the `is_hallucination` block of `src/transcription.py`,
   `src/config_schema.yaml`, `tests/test_hallucination_guard.py`,
   `tools/pad-upload/{ch57x_upload.py,final.json,markers.json}`.
+- Amended at code board 1: the live `paste` input method was NOT ported (unused — live runs `pynput`); its
+  schema option was dropped too. Shift handling was completed here instead of c3: per-character
+  `VkKeyScanW` lookup (Shift-only → real Shift + VK, else the original character), `should_continue()`
+  checked before the defensive release, and all three Shift keys released. ResultThread now initializes COM
+  on its own thread (key recordings may open WASAPI with the wake listener off).
 - `src/result_thread.py`: port the live one-liner — and state the semantic change explicitly: repo guards
   `extra_settings` on `is_wake`, live guards on `device is not None`, which applies
   `WasapiSettings(auto_convert=True)` to key recordings on the configured device (the pad MIC path). Because
@@ -154,6 +159,9 @@ Ordering is load-bearing (plan-board-1 P1):
   whitespace-only result types nothing but re-arms the listener (`source='key'` asserted). Full suite.
 
 ### c3 `shift-latch`
+> Status after c1 board 1: the Shift-release bullet and the uppercase Shift+VK tests are DONE in c1. The
+> paste/clipboard bullets below are MOOT — `_typewrite_paste` was never ported — unless paste is reintroduced.
+
 - `input_simulation.py`: defensive release covers `Key.shift_l`, `Key.shift_r`, and `Key.shift` (all three;
   releasing an unpressed key is a no-op) at the start of `_typewrite_pynput`, AND before the Ctrl+V in
   `_typewrite_paste` (a latched Shift would turn the paste into Ctrl+Shift+V).

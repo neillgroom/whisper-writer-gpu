@@ -10,7 +10,7 @@ from PyQt5.QtCore import QThread, QMutex, pyqtSignal
 from collections import deque
 from threading import Event
 
-from audio_devices import extra_settings
+from audio_devices import com_initialize, com_uninitialize, extra_settings
 from transcription import transcribe
 from utils import ConfigManager
 
@@ -83,7 +83,18 @@ class ResultThread(QThread):
         self.wait(2000)
 
     def run(self):
-        """Main execution method for the thread."""
+        """
+        Main execution method for the thread. COM is initialized on this thread for
+        the whole body: key recordings may open a WASAPI device from here, and that
+        must not depend on WakeListener's thread happening to be running.
+        """
+        com_held = com_initialize()
+        try:
+            self._run()
+        finally:
+            com_uninitialize(com_held)
+
+    def _run(self):
         try:
             if not self.is_running:
                 return
@@ -195,7 +206,7 @@ class ResultThread(QThread):
 
         stream = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16',
                                 blocksize=frame_size, device=device,
-                                extra_settings=extra_settings(device) if is_wake else None,
+                                extra_settings=extra_settings(device) if device is not None else None,
                                 callback=audio_callback)
         self._stream = stream  # publish BEFORE start so stop() can abort a hung open
         try:

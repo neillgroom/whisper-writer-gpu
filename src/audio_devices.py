@@ -10,7 +10,22 @@ resolve_input never raises: a backend that cannot be queried returns None, the
 same as a disconnected mic, so the always-on listener and the wake callback can
 treat it as "no mic right now" and retry rather than die.
 """
+import ctypes
+import sys
+
 import sounddevice as sd
+
+# Bound once at import on a private WinDLL, so argtypes/restype never touch the shared
+# windll.ole32 object other code (WakeListener) uses.
+_co_initialize_ex = _co_uninitialize = None
+if sys.platform == 'win32':
+    _ole32 = ctypes.WinDLL('ole32')
+    _co_initialize_ex = _ole32.CoInitializeEx
+    _co_initialize_ex.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    _co_initialize_ex.restype = ctypes.c_long  # HRESULT
+    _co_uninitialize = _ole32.CoUninitialize
+    _co_uninitialize.argtypes = []
+    _co_uninitialize.restype = None
 
 from utils import ConfigManager
 
@@ -55,9 +70,44 @@ def resolve_input(substring, devices=None, hostapis=None):
 
 def extra_settings(device):
     """
-    WASAPI resamples to our 16 kHz only when asked. A resolved index always gets
-    auto_convert; device=None (the system default via MME) gets nothing, as before.
+    WASAPI resamples to our 16 kHz only when asked. An index on the WASAPI host
+    API gets auto_convert. device=None (the system default via MME), a non-WASAPI
+    index (WasapiSettings there makes the stream open raise PortAudioError), and a
+    stale, out-of-range or negative index get nothing. Never raises.
     """
     if device is None:
         return None
-    return sd.WasapiSettings(auto_convert=True)
+    try:
+        devices = sd.query_devices()
+        if not 0 <= device < len(devices):
+            return None
+        hostapi = sd.query_hostapis()[devices[device]['hostapi']]
+        if 'WASAPI' not in hostapi['name']:
+            return None
+        return sd.WasapiSettings(auto_convert=True)
+    except Exception as error:
+        ConfigManager.console_print(f'Host API lookup for device {device} failed: {error}')
+        return None
+
+
+def com_initialize():
+    """
+    Initialize COM (multithreaded) on the calling worker thread, the way
+    WakeListener does: a Qt app leaves the main thread's apartment in STA, and a
+    worker that opens a WASAPI stream without its own COM init fails with
+    PortAudio -9999. Returns True when the caller holds a reference that
+    com_uninitialize() must release. Non-Windows: False, nothing called.
+    """
+    if _co_initialize_ex is None:
+        return False
+    COINIT_MULTITHREADED = 0x0
+    hr = _co_initialize_ex(None, COINIT_MULTITHREADED)
+    # S_OK (0) and S_FALSE (1, already initialized here) both need a CoUninitialize;
+    # RPC_E_CHANGED_MODE (negative) means another apartment owns this thread -- do not.
+    return hr in (0, 1)
+
+
+def com_uninitialize(held):
+    """Release the reference com_initialize() returned True for."""
+    if held and _co_uninitialize is not None:
+        _co_uninitialize()

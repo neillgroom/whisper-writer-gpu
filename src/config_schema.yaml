@@ -54,6 +54,7 @@ model_options:
         - large-v1
         - large-v2
         - large-v3
+        - large-v3-turbo
     device:
       value: auto
       type: str
@@ -72,11 +73,11 @@ model_options:
         - float16
         - int8
     condition_on_previous_text:
-      value: true
+      value: false
       type: bool
       description: "Set to true to use the previously transcribed text as a prompt for the next transcription request."
     vad_filter:
-      value: false
+      value: true
       type: bool
       description: "Set to true to use a voice activity detection (VAD) filter to remove silence from the recording."
     model_path:
@@ -109,7 +110,7 @@ recording_options:
       - hold_to_record
   sound_device:
     value: null
-    type: str
+    type: int
     description: "The numeric index of the sound device to use for recording. To find device numbers, run `python -m sounddevice`"
   sample_rate:
     value: 16000

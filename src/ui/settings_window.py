@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 from dotenv import set_key, load_dotenv
@@ -12,6 +13,69 @@ from ui.base_window import BaseWindow
 from utils import ConfigManager
 
 load_dotenv()
+
+
+def display_text(value):
+    """Text for a line edit: a null setting shows as an empty field, never the word 'None'."""
+    return '' if value is None else str(value)
+
+
+def parse_typed_text(text, value_type, nullable=True):
+    """
+    Line-edit text back to a setting value. int/float: surrounding whitespace is
+    ignored; a blank field saves as None only when the setting is `nullable`
+    (its schema default is null), else ValueError; non-numeric text, NaN and
+    infinity raise ValueError. Any other type: the text as typed, or None when
+    it is empty (whitespace is kept).
+    """
+    if value_type not in ('int', 'float'):
+        return text or None
+    text = text.strip()
+    if not text:
+        if nullable:
+            return None
+        raise ValueError('cannot be empty')
+    if value_type == 'int':
+        try:
+            return int(text)
+        except ValueError:
+            raise ValueError('must be a whole number') from None
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError('must be a number') from None
+    if not math.isfinite(value):
+        raise ValueError('must be a finite number')
+    return value
+
+
+def combobox_items(options, value):
+    """
+    The items a combobox offers. A configured value missing from `options` is
+    appended, so selecting it never silently falls back to the first option
+    (which Save would then write over the real setting).
+    """
+    items = list(options)
+    if value is not None and value not in items:
+        items.append(value)
+    return items
+
+
+def stage_values(readers):
+    """
+    Parse every field before anything is written. `readers` is a list of
+    (name, read) where read() returns the parsed value or raises ValueError.
+    Returns (values, None) with values a list of (name, value) when every field
+    parses, else (None, (name, reason)) for the first field that does not.
+    """
+    values = []
+    for name, read in readers:
+        try:
+            values.append((name, read()))
+        except ValueError as error:
+            return None, (name, str(error))
+    return values, None
+
 
 class SettingsWindow(BaseWindow):
     settings_closed = pyqtSignal()
@@ -113,9 +177,9 @@ class SettingsWindow(BaseWindow):
         elif meta_type == 'str' and 'options' in meta:
             return self.create_combobox(current_value, meta['options'])
         elif meta_type == 'str':
-            return self.create_line_edit(current_value, key)
+            return self.create_line_edit(display_text(current_value), key)
         elif meta_type in ['int', 'float']:
-            return self.create_line_edit(str(current_value))
+            return self.create_line_edit(display_text(current_value))
         return None
 
     def create_checkbox(self, value, key):
@@ -127,9 +191,17 @@ class SettingsWindow(BaseWindow):
 
     def create_combobox(self, value, options):
         widget = QComboBox()
-        widget.addItems(options)
-        widget.setCurrentText(value)
+        widget.addItems(list(options))
+        self.select_combobox(widget, value)
         return widget
+
+    @staticmethod
+    def select_combobox(widget, value):
+        """Select `value`, adding it first if it is not an option (never fall back to item 0); None leaves the selection."""
+        current = [widget.itemText(i) for i in range(widget.count())]
+        widget.addItems(combobox_items(current, value)[len(current):])
+        if value is not None:
+            widget.setCurrentText(value)
 
     def create_line_edit(self, value, key=None):
         widget = QLineEdit(value)
@@ -176,8 +248,23 @@ class SettingsWindow(BaseWindow):
         QMessageBox.information(self, 'Description', description)
 
     def save_settings(self):
-        """Save the settings to the config file and .env file."""
-        self.iterate_settings(self.save_setting)
+        """Save the settings to the config file and .env file. Nothing is written unless every field parses."""
+        readers = []
+
+        def collect(widget, category, sub_category, key, meta):
+            path = (category, sub_category, key) if sub_category else (category, key)
+            nullable = meta.get('value') is None
+            readers.append((path, lambda: self.get_widget_value_typed(widget, meta.get('type'), nullable)))
+        self.iterate_settings(collect)
+
+        values, bad = stage_values(readers)
+        if bad is not None:
+            path, reason = bad
+            QMessageBox.warning(self, 'Invalid setting',
+                                f"'{path[-1].replace('_', ' ').capitalize()}' {reason}. Nothing was saved.")
+            return
+        for path, value in values:
+            ConfigManager.set_config_value(value, *path)
 
         # Save the API key to the .env file
         api_key = ConfigManager.get_config_value('model_options', 'api', 'api_key') or ''
@@ -192,13 +279,6 @@ class SettingsWindow(BaseWindow):
         self.settings_saved.emit()
         self.close()
 
-    def save_setting(self, widget, category, sub_category, key, meta):
-        value = self.get_widget_value_typed(widget, meta.get('type'))
-        if sub_category:
-            ConfigManager.set_config_value(value, category, sub_category, key)
-        else:
-            ConfigManager.set_config_value(value, category, key)
-
     def reset_settings(self):
         """Reset the settings to the saved values."""
         ConfigManager.reload_config()
@@ -209,12 +289,8 @@ class SettingsWindow(BaseWindow):
         self.iterate_settings(self.update_widget_value)
 
     def update_widget_value(self, widget, category, sub_category, key, meta):
-        """Update a single widget with the value from the configuration."""
-        if sub_category:
-            config_value = ConfigManager.get_config_value(category, sub_category, key)
-        else:
-            config_value = ConfigManager.get_config_value(category, key)
-
+        """Update a single widget with the value from the configuration (schema default when unset, as at creation)."""
+        config_value = self.get_config_value(category, sub_category, key, meta)
         self.set_widget_value(widget, config_value, meta.get('type'))
 
     def set_widget_value(self, widget, value, value_type):
@@ -222,29 +298,23 @@ class SettingsWindow(BaseWindow):
         if isinstance(widget, QCheckBox):
             widget.setChecked(value)
         elif isinstance(widget, QComboBox):
-            widget.setCurrentText(value)
+            self.select_combobox(widget, value)
         elif isinstance(widget, QLineEdit):
-            widget.setText(str(value) if value is not None else '')
+            widget.setText(display_text(value))
         elif isinstance(widget, QWidget) and widget.layout():
             # This is for the model_path widget
             line_edit = widget.layout().itemAt(0).widget()
             if isinstance(line_edit, QLineEdit):
-                line_edit.setText(str(value) if value is not None else '')
+                line_edit.setText(display_text(value))
 
-    def get_widget_value_typed(self, widget, value_type):
-        """Get the value of the widget with proper typing."""
+    def get_widget_value_typed(self, widget, value_type, nullable=True):
+        """Get the value of the widget with proper typing (see parse_typed_text for `nullable`)."""
         if isinstance(widget, QCheckBox):
             return widget.isChecked()
         elif isinstance(widget, QComboBox):
             return widget.currentText() or None
         elif isinstance(widget, QLineEdit):
-            text = widget.text()
-            if value_type == 'int':
-                return int(text) if text else None
-            elif value_type == 'float':
-                return float(text) if text else None
-            else:
-                return text or None
+            return parse_typed_text(widget.text(), value_type, nullable)
         elif isinstance(widget, QWidget) and widget.layout():
             # This is for the model_path widget
             line_edit = widget.layout().itemAt(0).widget()

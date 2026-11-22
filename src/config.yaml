@@ -8,8 +8,8 @@ model_options:
     model: large-v3-turbo
     device: cuda
     compute_type: float16
-    condition_on_previous_text: true
-    vad_filter: false
+    condition_on_previous_text: false
+    vad_filter: true
     model_path: null
 recording_options:
   activation_key: pause
@@ -29,3 +29,11 @@ misc:
   print_to_terminal: true
   hide_status_window: false
   noise_on_completion: false
+wake_options:
+  enabled: false
+  wake_model: hey_jarvis_v0.1
+  threshold: 0.4
+  allowed_processes: WindowsTerminal.exe
+  laptop_match: Microphone Array
+  no_speech_timeout_ms: 4000
+  max_recording_s: 60

@@ -81,6 +81,16 @@ def listener(stream_factory, detector=None, device=3):
 
 
 class WakeListenerTests(unittest.TestCase):
+    def setUp(self):
+        # Every stream open calls extra_settings(device): fake the host-API lists so no
+        # test reads the real PortAudio device list. Index 3 (the default) is WASAPI.
+        devices = [{'name': f'dev{i}', 'hostapi': 1, 'max_input_channels': 1} for i in range(8)]
+        hostapis = [{'name': 'MME'}, {'name': 'Windows WASAPI'}]
+        patcher = mock.patch.multiple('sounddevice', query_devices=mock.Mock(return_value=devices),
+                                      query_hostapis=mock.Mock(return_value=hostapis))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_frames_reach_the_detector_and_a_detection_is_emitted(self):
         wake, wakes, errors = listener(lambda **kw: FakeStream(frames=5, **kw))
         wake.start()

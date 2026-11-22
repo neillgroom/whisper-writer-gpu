@@ -1,0 +1,15 @@
+{
+  "buttons": {
+    "0": "pause",
+    "1": "ctrl-alt-shift-c",
+    "2": "esc",
+    "3": "ctrl-alt-shift-e",
+    "4": "ctrl-alt-shift-r",
+    "5": "enter"
+  },
+  "knob": {
+    "ccw": "ctrl-alt-shift-left",
+    "press": "ctrl-alt-shift-enter",
+    "cw": "ctrl-alt-shift-right"
+  }
+}

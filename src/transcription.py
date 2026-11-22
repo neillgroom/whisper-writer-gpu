@@ -168,12 +168,58 @@ def transcribe_api(audio_data):
     )
     return response.text
 
+# Phrases Whisper is known to produce from silence or background noise. A
+# transcript that is only one of these (or the initial prompt's own sentences)
+# is dropped rather than typed.
+SILENCE_PHRASES = {
+    'thank you', 'thank you very much', 'thanks', 'thanks for watching',
+    'thank you for watching', 'thanks for listening', 'thank you for listening',
+    'bye', 'you',
+}
+MAX_PHRASE_REPEATS = 3
+
+
+def _phrase_key(text):
+    return re.sub(r'[^\w\s]', '', text).lower().split()
+
+
+def is_hallucination(transcription, initial_prompt=None):
+    """
+    True when a transcript looks like Whisper output on silence: one short
+    phrase repeated over and over, a lone known silence phrase, or a sentence
+    copied from the initial prompt.
+    """
+    text = transcription.strip()
+    if not text:
+        return False
+    words = _phrase_key(text)
+    if not words:
+        return False
+    # A loop: the whole transcript is one phrase of up to 8 words, repeated.
+    for size in range(1, min(8, len(words) // MAX_PHRASE_REPEATS) + 1):
+        unit = words[:size]
+        if len(words) % size == 0 and words == unit * (len(words) // size):
+            return True
+    if ' '.join(words) in SILENCE_PHRASES:
+        return True
+    if initial_prompt:
+        prompt_sentences = {' '.join(_phrase_key(s)) for s in re.split(r'(?<=[.!?])\s+', initial_prompt) if s.strip()}
+        if ' '.join(words) in prompt_sentences:
+            return True
+    return False
+
+
 def post_process_transcription(transcription):
     """
     Apply post-processing to the transcription.
     """
     transcription = transcription.strip()
-    
+
+    initial_prompt = ConfigManager.get_config_section('model_options')['common'].get('initial_prompt')
+    if is_hallucination(transcription, initial_prompt):
+        ConfigManager.console_print(f'Dropped a likely silence hallucination ({len(transcription)} characters).')
+        return ''
+
     # Clean up common filler words (uh, um)
     transcription = re.sub(r'\b(uh|um)\b[,.]?', '', transcription, flags=re.IGNORECASE)
     

@@ -57,9 +57,87 @@ class ResolveInputTests(unittest.TestCase):
 
 
 class ExtraSettingsTests(unittest.TestCase):
-    def test_auto_convert_only_for_a_resolved_index(self):
+    def setUp(self):
+        patches = [mock.patch.object(audio_devices.sd, 'query_devices', return_value=DEVICES),
+                   mock.patch.object(audio_devices.sd, 'query_hostapis', return_value=HOSTAPIS)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_none_gets_nothing(self):
         self.assertIsNone(extra_settings(None))
-        self.assertIsInstance(extra_settings(2), sd.WasapiSettings)
+
+    def test_wasapi_index_gets_auto_convert(self):
+        settings = extra_settings(2)
+        self.assertIsInstance(settings, sd.WasapiSettings)
+        # sounddevice keeps no public attribute; auto_convert sets paWinWasapiAutoConvert (64).
+        self.assertTrue(settings._streaminfo.flags & 64)
+        self.assertFalse(sd.WasapiSettings()._streaminfo.flags & 64)  # the check can fail
+
+    def test_non_wasapi_index_gets_nothing(self):
+        self.assertIsNone(extra_settings(0))  # MME
+        self.assertIsNone(extra_settings(4))  # WDM-KS
+
+    def test_stale_out_of_range_or_negative_index_gets_nothing(self):
+        self.assertIsNone(extra_settings(len(DEVICES)))
+        self.assertIsNone(extra_settings(99))
+        self.assertIsNone(extra_settings(-1))  # would wrap to the last (WASAPI) device
+        with mock.patch.object(audio_devices.sd, 'query_devices', return_value=[]):
+            self.assertIsNone(extra_settings(0))
+
+    def test_a_lookup_error_returns_none_instead_of_raising(self):
+        with mock.patch.object(audio_devices.sd, 'query_devices', side_effect=OSError('backend')):
+            self.assertIsNone(extra_settings(2))
+        with mock.patch.object(audio_devices.sd, 'query_hostapis', side_effect=OSError('backend')):
+            self.assertIsNone(extra_settings(2))
+
+
+class ComTests(unittest.TestCase):
+    def fake_ole(self, hr):
+        ole = mock.Mock()
+        ole.CoInitializeEx.return_value = hr
+        for name, fake in (('_co_initialize_ex', ole.CoInitializeEx), ('_co_uninitialize', ole.CoUninitialize)):
+            patcher = mock.patch.object(audio_devices, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return ole
+
+    def test_windows_inits_multithreaded_and_releases_when_held(self):
+        ole = self.fake_ole(0)
+        held = audio_devices.com_initialize()
+        audio_devices.com_uninitialize(held)
+        ole.CoInitializeEx.assert_called_once_with(None, 0)
+        self.assertTrue(held)
+        ole.CoUninitialize.assert_called_once_with()
+
+    def test_already_initialized_still_needs_release(self):
+        self.fake_ole(1)
+        self.assertTrue(audio_devices.com_initialize())
+
+    def test_changed_mode_is_not_released(self):
+        ole = self.fake_ole(-2147417850)  # RPC_E_CHANGED_MODE
+        held = audio_devices.com_initialize()
+        audio_devices.com_uninitialize(held)
+        self.assertFalse(held)
+        ole.CoUninitialize.assert_not_called()
+
+    def test_non_windows_calls_neither(self):
+        # Off Windows nothing is bound at import.
+        with mock.patch.object(audio_devices, '_co_initialize_ex', None), \
+             mock.patch.object(audio_devices, '_co_uninitialize', None):
+            held = audio_devices.com_initialize()
+            audio_devices.com_uninitialize(held)
+            audio_devices.com_uninitialize(True)  # even a stray True cannot call anything
+        self.assertFalse(held)
+
+    def test_the_binding_is_private_with_types(self):
+        if audio_devices.sys.platform != 'win32':
+            self.skipTest('Windows binding')
+        import ctypes
+        self.assertIsNot(audio_devices._co_initialize_ex, ctypes.windll.ole32.CoInitializeEx)
+        self.assertEqual(audio_devices._co_initialize_ex.restype, ctypes.c_long)
+        # Real round trip on this test thread: init, then release only if held.
+        audio_devices.com_uninitialize(audio_devices.com_initialize())
 
 
 if __name__ == '__main__':
