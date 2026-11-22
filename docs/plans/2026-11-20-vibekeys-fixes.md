@@ -168,7 +168,9 @@ Ordering is load-bearing (plan-board-1 P1):
   dead.
 - `_typewrite_paste` cleanup while touching it: remove the pre-paste `pyperclip.copy(backup)` clobber (it
   wastes clipboard calls on success and can overwrite newer user clipboard data with stale backup if
-  `copy(text)` fails — the backup is restored at the START of the next paste instead), and re-check
+  `copy(text)` fails — at the START of the next paste the backup is restored only if the clipboard still
+  holds the transcript we put there (read-back equals the last pasted text); otherwise the backup is
+  dropped, so a copy the user made in between is never overwritten), and re-check
   `should_continue()` immediately before the Ctrl+V after the retry sleeps.
 - Verify: extend `tests/test_typewrite.py` (existing repo file, currently 3 lowercase-pynput tests, no
   `pressed()` on its FakeKeyboard): add uppercase Shift+VK tests and `_typewrite_paste` tests (success; copy
@@ -188,7 +190,11 @@ Ordering is load-bearing (plan-board-1 P1):
 1. Snapshot: copy live `C:\Tools\whisper-writer-wake\src` in its ENTIRETY (including `src\main.py` — every
    file the deploy overwrites lives under `src\`; verified live: no root-level `main.py`) to a timestamped
    backup (`...\whisper-writer-wake\bak-<date>-src\`). Rollback = restore the backup and restart.
-2. Copy CODE files only: `input_simulation.py`, `transcription.py`, `result_thread.py`, `audio_devices.py`,
+   **c0-only deploy (done 2026-11-22, backup `bak-20261122-102337-src`):** copied ONLY
+   `src/key_listener.py`, plus the live-config `silence_duration` edit (never the repo `config.yaml`). The
+   full list in step 2 applies only after c1 is accepted: before c1 ports the live-only changes, copying
+   `input_simulation.py`/`transcription.py` from the repo would overwrite them.
+2. (After c1 is accepted) Copy CODE files only: `input_simulation.py`, `transcription.py`, `result_thread.py`, `audio_devices.py`,
    `main.py`, `key_listener.py`, `config_schema.yaml`, `wake_setup.py`, `ui/settings_window.py`. **Never copy `config.yaml`** —
    live keeps `sound_device: 15` and `wake_options.enabled: true`. (`main.py` is required: c2's
    `on_transcription_complete` gate lives there; without it the install still types the lone space.)

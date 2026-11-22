@@ -818,6 +818,7 @@ class PynputBackend(InputBackend):
         self.key_map = None
         self.vk_map = {}
         self.swallowed_down = set()  # vks whose key-down was swallowed and whose key-up is pending
+        self.passed_down = set()  # swallowable vks whose key-down was passed through (modifier held)
 
     def get_swallow_keys(self) -> frozenset:
         """Keys to consume; replaced by the KeyListener with its own accessor."""
@@ -864,6 +865,7 @@ class PynputBackend(InputBackend):
     def stop(self):
         """Stop listening for keyboard and mouse events."""
         self.swallowed_down.clear()
+        self.passed_down.clear()
         if self.keyboard_listener:
             self.keyboard_listener.stop()
             self.keyboard_listener = None
@@ -892,14 +894,19 @@ class PynputBackend(InputBackend):
         key_code = self.vk_map.get(vk)
         if key_code is None:
             return True
+        # The swallow/pass decision is made once, at the first key-down of a hold, and kept for every
+        # repeat and the key-up, whatever the modifiers do mid-hold: never half a keystroke.
         if msg in self._WIN32_KEY_UP:
-            # Only the up of a swallowed down is swallowed; never half a keystroke.
+            if vk in self.passed_down:
+                self.passed_down.discard(vk)
+                return True
             if vk not in self.swallowed_down:
                 return True
             self.swallowed_down.discard(vk)
             event_type = InputEvent.KEY_RELEASE
         elif msg in self._WIN32_KEY_DOWN:
-            # Auto-repeat of a swallowed key stays swallowed even if a modifier went down mid-hold.
+            if vk in self.passed_down:
+                return True
             if vk not in self.swallowed_down:
                 if key_code not in self.get_swallow_keys():
                     return True
@@ -908,6 +915,7 @@ class PynputBackend(InputBackend):
                 except Exception:
                     modified = False  # unknown state: swallow; a leaked Ctrl+Z flood is the worse failure
                 if modified:
+                    self.passed_down.add(vk)
                     return True  # Alt+F4, Win+Pause etc. pass through exactly as before
                 self.swallowed_down.add(vk)
             event_type = InputEvent.KEY_PRESS

@@ -119,6 +119,9 @@ def recording(backend):
     return events
 
 
+@unittest.skipUnless(sys.platform == 'win32',
+                     'Windows-only feature: these tests send Windows virtual-key codes, which only '
+                     "match pynput's enums on its win32 backend")
 class KeySwallowTests(unittest.TestCase):
     def test_pause_down_is_dispatched_once_and_suppressed(self):
         listener, backend = make_listener('pause')
@@ -281,6 +284,34 @@ class KeySwallowTests(unittest.TestCase):
         self.assertIsNone(backend.keyboard_listener)
         self.assertTrue(send(backend, WM_KEYDOWN, VK_PAUSE, listener=old)[0])
         self.assertEqual(old.suppressed, 1)
+
+    def test_pass_decision_holds_when_modifier_released_mid_hold(self):
+        listener, backend = make_listener('f5')
+        events = recording(backend)
+        self.assertFalse(send(backend, WM_KEYDOWN, VK_F5, modifier=True)[0])  # Ctrl+F5 down
+        for _ in range(5):  # Ctrl released, F5 still auto-repeating
+            self.assertFalse(send(backend, WM_KEYDOWN, VK_F5, modifier=False)[0])
+        self.assertFalse(send(backend, WM_KEYUP, VK_F5, modifier=False)[0])
+        self.assertEqual(backend.keyboard_listener.suppressed, 0)
+        self.assertEqual(backend.forwarded, 7)  # each event forwarded exactly once
+        self.assertEqual(len(events), 7)  # and dispatched once, via the normal path only
+        # A fresh unmodified press after that key-up is swallowed normally.
+        self.assertTrue(send(backend, WM_KEYDOWN, VK_F5)[0])
+        self.assertTrue(send(backend, WM_KEYUP, VK_F5)[0])
+        self.assertEqual(backend.forwarded, 7)
+
+    def test_rearm_clears_both_hold_sets(self):
+        listener, backend = make_listener('pause')
+        self.assertFalse(send(backend, WM_KEYDOWN, VK_PAUSE, modifier=True)[0])
+        backend.stop()
+        start_backend(backend)
+        self.assertEqual(backend.passed_down, set())
+        self.assertEqual(backend.swallowed_down, set())
+        self.assertTrue(send(backend, WM_KEYDOWN, VK_PAUSE)[0])  # no stale pass-through decision
+
+
+class KeySwallowPlatformTests(unittest.TestCase):
+    """Runs everywhere: no Windows virtual-key values involved."""
 
     def test_filter_only_passed_on_windows(self):
         with mock.patch.dict(sys.modules, {'pynput': fake_pynput()}):
