@@ -1,7 +1,8 @@
 # Plan: vibekeys fixes — pad MIC, doubled dictation, Shift latch, drift port, AHK scoping
 
 Date: 2026-11-20 · Repo: whisper-writer-gpu-wake · Base: main (358e85f) · Policy: review-routing-2026-10-07-v1
-Rev 3 — folds in every plan-board-1 and plan-board-2 finding (runs 2026-11-21T02-42-08 and 2026-11-21T02-58-10).
+Rev 5 (2026-11-22) - adds chunk c0 `swallow-key`, which goes FIRST. Neill approved this cut in session on
+2026-11-22 with no fourth plan board (plan cap spent at b3). Revs 1-4 folded in plan boards 1-3.
 
 ## Problem
 
@@ -38,6 +39,44 @@ unreviewed live-only code drift and an approved-but-unapplied AHK change.
    terminal-only scoping (2026-11-20 session).
 
 ## Chunks (each = one behavior, one board)
+
+### c0 `swallow-key` (added rev 5 - goes first)
+
+**Neill's report, 2026-11-22:** holding the dictation key (pad MIC and keyboard Pause/Break, "both do it") in a
+terminal prompt (Claude Code / OpenCode) "eats characters one by one"; "it's only when there's stuff that's on
+the line that it deletes it"; Hey Jarvis is fine.
+
+**Measured cause (probe run 2026-11-22, Windows Terminal 1.25.3131.0, own window, injected held Pause):**
+- The held key auto-repeats (capture7: 181 physical PAUSE key-downs, 5 key-ups, about 30 per second).
+- `PynputBackend.start` installs a plain `keyboard.Listener`: it observes the key and never consumes it, so
+  every repeat reaches the focused window.
+- Windows Terminal hands a VT-input console app one byte `0x1A` (Ctrl+Z) per Pause key-down; with the full
+  kitty keyboard flags it sends `CSI 57362 ... u` per key-down; with win32-input-mode `CSI 19;69;0;1;32;1 _`.
+  A prompt that binds Ctrl+Z to undo removes typed text one step per repeat. A blank line has nothing to undo.
+- The wake path holds no key, so it is unaffected.
+
+This replaces evidence item 3's explanation of the delete symptom: the right-Shift latch is UNPROVEN as its
+cause (it does not explain delete-while-holding, delete-only-when-the-line-has-text, or Jarvis being fine).
+c3's Shift/clipboard hardening stands or falls on its own merits, not on this symptom.
+
+**Change (`src/key_listener.py` only - byte-identical in live and main, so c0 deploys without c1):**
+- `KeyListener` derives the keys to swallow from the activation chord: only when the chord is exactly one
+  non-modifier key. A chord with modifiers swallows nothing (unchanged behaviour).
+- `PynputBackend.start` passes `win32_event_filter=` to `keyboard.Listener`. For a swallowed key the filter
+  translates key-down/up to the existing `(KeyCode, InputEvent)` pair, calls `self.on_input_event(...)`
+  directly, then `suppress_event()`. Direct dispatch is required: pynput 1.7.6 does not call
+  `on_press`/`on_release` for a suppressed event.
+- `KeyChord` set logic already folds the repeats into one activation; reused unchanged.
+- No new config option, no new dependency. If the app is not running the key behaves as before.
+- Verify: `tests/test_key_swallow.py` - swallowed key dispatched once and suppressed; 20 repeats = one
+  activate then one deactivate on release; other keys pass through; a modifier chord swallows nothing; the
+  non-Windows start path is unchanged. Full suite. Live: injected 2 s Pause hold into a test window holding
+  text - the window receives zero Pause events and the app records.
+
+**Rides with the c0 deploy (config only, live `src/config.yaml`, not the repo template):**
+`recording_options.silence_duration` 900 -> 2500. Neill, 2026-11-22: "I'd like Jarvis to give me an extra
+second of pause if I'm thinking ... maybe an extra second or two seconds." Hold-to-record never reads this
+timer, so Pause dictation is unaffected; a Jarvis transcript lands about 1.6 s later than before.
 
 ### c1 `port-drift`
 Make the repo tree match the running install (and carry the newer repo code in the same branch):
